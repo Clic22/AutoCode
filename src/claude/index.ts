@@ -390,13 +390,20 @@ You MUST output your review in this exact format:
 Now review the implementation:`;
   }
 
-  private execute(repoPath: string, prompt: string): Promise<ClaudeResult> {
+  private async execute(repoPath: string, prompt: string): Promise<ClaudeResult> {
+    // Write prompt to a temporary file to avoid shell escaping issues
+    const promptFile = path.join(repoPath, '.autocode-prompt.txt');
+    await fs.writeFile(promptFile, prompt, 'utf-8');
+
     return new Promise((resolve) => {
+      // Use stdin to pass the prompt - more reliable than command line args
       const args = [
         '--print',
         '--dangerously-skip-permissions',
-        prompt,
       ];
+
+      console.log(`[Claude] Starting CLI in: ${repoPath}`);
+      console.log(`[Claude] Prompt length: ${prompt.length} characters`);
 
       const proc = spawn(this.cliPath, args, {
         cwd: repoPath,
@@ -410,6 +417,10 @@ Now review the implementation:`;
       let stdout = '';
       let stderr = '';
 
+      // Send prompt via stdin
+      proc.stdin.write(prompt);
+      proc.stdin.end();
+
       proc.stdout.on('data', (data) => {
         const text = data.toString();
         stdout += text;
@@ -419,10 +430,20 @@ Now review the implementation:`;
       proc.stderr.on('data', (data) => {
         const text = data.toString();
         stderr += text;
-        process.stderr.write(`[Claude Error] ${text}`);
+        // Only print actual errors, not progress messages
+        if (!text.includes('�') && !text.includes('─')) {
+          process.stderr.write(`[Claude Error] ${text}`);
+        }
       });
 
-      proc.on('close', (code) => {
+      proc.on('close', async (code) => {
+        // Clean up prompt file
+        try {
+          await fs.unlink(promptFile);
+        } catch {
+          // Ignore cleanup errors
+        }
+
         console.log(`\n[Claude] Process exited with code: ${code}`);
 
         if (code === 0) {
