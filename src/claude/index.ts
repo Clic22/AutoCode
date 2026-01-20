@@ -386,14 +386,13 @@ Now review the implementation:`;
     console.log(`[Claude] Prompt length: ${prompt.length} characters`);
 
     return new Promise((resolve) => {
-      // Read prompt from file and pass via stdin
       const args = ['--print', '--dangerously-skip-permissions'];
 
       console.log(`[Claude] Executing: ${this.cliPath} ${args.join(' ')}`);
 
       const proc = spawn(this.cliPath, args, {
         cwd: repoPath,
-        shell: false,  // Don't use shell to avoid escaping issues
+        shell: true,  // Need shell to resolve PATH
         stdio: ['pipe', 'pipe', 'pipe'],
         env: {
           ...process.env,
@@ -404,9 +403,10 @@ Now review the implementation:`;
       let stdout = '';
       let stderr = '';
 
-      // Read file and pipe to stdin
-      const fileStream = require('fs').createReadStream(promptFile);
-      fileStream.pipe(proc.stdin);
+      // Write prompt directly to stdin then close it
+      proc.stdin.write(prompt, 'utf-8', () => {
+        proc.stdin.end();
+      });
 
       proc.stdout.on('data', (data: Buffer) => {
         const text = data.toString();
