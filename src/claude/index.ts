@@ -210,26 +210,12 @@ Do NOT repeat the same mistakes.
     originalContent: string,
     threadMessages?: string[]
   ): Promise<void> {
+    // Only save the generated development prompt - keep it concise
     const content = `# AutoCode Development Prompt
 
 Generated: ${new Date().toISOString()}
 
-## Original Discord Request
-${originalContent}
-
-${threadMessages && threadMessages.length > 0 ? `## Discussion Thread
-${threadMessages.join('\n')}
-
-` : ''}## Generated Development Prompt
-
 ${developmentPrompt}
-
----
-*This file can be used to re-run the implementation with:*
-\`\`\`bash
-cd repo
-claude --print --dangerously-skip-permissions "$(cat ../development-prompt.md)"
-\`\`\`
 `;
 
     await fs.writeFile(filePath, content, 'utf-8');
