@@ -41,12 +41,28 @@ export class GitLabClient {
         remove_source_branch: true,
       });
 
+      let data = response.data;
+
+      // If response is an array, something unexpected happened
+      // Try to find existing MR for this branch
+      if (Array.isArray(data)) {
+        console.log(`[GitLab] Received array response, looking for existing MR...`);
+        return await this.findExistingMR(options.sourceBranch, options.targetBranch);
+      }
+
       const result: MergeRequestResult = {
-        id: response.data.id,
-        iid: response.data.iid,
-        webUrl: response.data.web_url,
-        title: response.data.title,
+        id: data.id,
+        iid: data.iid,
+        webUrl: data.web_url,
+        title: data.title,
       };
+
+      // If web_url is missing, try to construct it
+      if (!result.webUrl && result.iid) {
+        const projectResponse = await this.client.get(`/projects/${this.projectId}`);
+        const projectUrl = projectResponse.data.web_url;
+        result.webUrl = `${projectUrl}/-/merge_requests/${result.iid}`;
+      }
 
       console.log(`[GitLab] Merge request created: ${result.webUrl}`);
       return result;
@@ -60,6 +76,32 @@ export class GitLabClient {
       }
       throw error;
     }
+  }
+
+  async findExistingMR(sourceBranch: string, targetBranch: string): Promise<MergeRequestResult> {
+    console.log(`[GitLab] Looking for existing MR: ${sourceBranch} -> ${targetBranch}`);
+
+    const response = await this.client.get(`/projects/${this.projectId}/merge_requests`, {
+      params: {
+        source_branch: sourceBranch,
+        target_branch: targetBranch,
+        state: 'opened',
+      },
+    });
+
+    const mrs = response.data;
+    if (Array.isArray(mrs) && mrs.length > 0) {
+      const mr = mrs[0];
+      console.log(`[GitLab] Found existing MR: !${mr.iid} - ${mr.title}`);
+      return {
+        id: mr.id,
+        iid: mr.iid,
+        webUrl: mr.web_url,
+        title: mr.title,
+      };
+    }
+
+    throw new Error(`No existing MR found for branch ${sourceBranch}`);
   }
 
   async getDefaultBranch(): Promise<string> {
