@@ -153,6 +153,13 @@ export class GitLabClient {
     } catch (error: any) {
       console.error(`[GitLab] Failed to create merge request:`);
       console.error(`[GitLab]   Error: ${error.message}`);
+
+      // If MR already exists, try to find and return it
+      if (error.message && error.message.includes('already exists')) {
+        console.log(`[GitLab] MR already exists, looking for existing one...`);
+        return await this.findExistingMR(options.sourceBranch, options.targetBranch);
+      }
+
       throw error;
     }
   }

@@ -92,7 +92,16 @@ export class DiscordBot {
         await message.fetch();
       }
 
-      if (message.channelId !== this.channelId) {
+      // Check if the message is in the forum channel or in a thread of the forum channel
+      const channel = message.channel;
+      let isInForumChannel = message.channelId === this.channelId;
+
+      // If it's a thread, check if the parent is our forum channel
+      if (!isInForumChannel && channel.isThread()) {
+        isInForumChannel = channel.parentId === this.channelId;
+      }
+
+      if (!isInForumChannel) {
         return;
       }
 
