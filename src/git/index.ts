@@ -189,10 +189,51 @@ export class GitManager implements GitOperations {
   }
 
   /**
+   * Find and remove any worktree using a specific branch
+   */
+  private async removeWorktreeForBranch(git: SimpleGit, branchName: string): Promise<void> {
+    try {
+      // List all worktrees
+      const result = await git.raw(['worktree', 'list', '--porcelain']);
+      const lines = result.split('\n');
+
+      let currentWorktree = '';
+      for (const line of lines) {
+        if (line.startsWith('worktree ')) {
+          currentWorktree = line.substring('worktree '.length);
+        } else if (line.startsWith('branch refs/heads/') && currentWorktree) {
+          const worktreeBranch = line.substring('branch refs/heads/'.length);
+          if (worktreeBranch === branchName && currentWorktree !== this.baseRepoPath) {
+            console.log(`[Git] Removing worktree that uses branch ${branchName}: ${currentWorktree}`);
+            try {
+              await git.raw(['worktree', 'remove', currentWorktree, '--force']);
+            } catch (err) {
+              // If worktree remove fails, try to delete the directory manually
+              console.log(`[Git] Worktree remove failed, trying manual cleanup...`);
+              try {
+                await fs.rm(currentWorktree, { recursive: true, force: true });
+                await git.raw(['worktree', 'prune']);
+              } catch {
+                // Ignore cleanup errors
+              }
+            }
+          }
+          currentWorktree = '';
+        }
+      }
+    } catch (error) {
+      console.warn(`[Git] Error checking worktrees:`, error);
+    }
+  }
+
+  /**
    * Delete a local branch if it exists
    */
   private async deleteBranchIfExists(git: SimpleGit, branchName: string): Promise<void> {
     if (await this.branchExists(git, branchName)) {
+      // First, remove any worktree using this branch
+      await this.removeWorktreeForBranch(git, branchName);
+
       console.log(`[Git] Deleting existing local branch: ${branchName}`);
       try {
         await git.branch(['-D', branchName]);
