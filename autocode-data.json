@@ -1,5 +1,26 @@
 {
   "processedMessageIds": [],
-  "lastScanTimestamp": 1768915186902,
-  "workspaces": {}
+  "lastScanTimestamp": 1768915362285,
+  "workspaces": {
+    "1459264974978416753": {
+      "messageId": "1459264974978416753",
+      "workspacePath": "C:\\Work\\AutoCode\\workspaces\\1459264974978416753-644e09d0-8e02-429e-ad75-90c420021f23",
+      "branchName": "fix/systray-icon-weird-activity",
+      "repoPath": "C:\\Work\\AutoCode\\workspaces\\1459264974978416753-644e09d0-8e02-429e-ad75-90c420021f23\\repo",
+      "status": "analysis",
+      "attempt": 1,
+      "createdAt": 1768915383812,
+      "updatedAt": 1768915383819
+    },
+    "1460699596899745862": {
+      "messageId": "1460699596899745862",
+      "workspacePath": "C:\\Work\\AutoCode\\workspaces\\1460699596899745862-91bc5f4a-7ada-4c67-997e-089a64595677",
+      "branchName": "feature/carousel-20-improvements-needed",
+      "repoPath": "C:\\Work\\AutoCode\\workspaces\\1460699596899745862-91bc5f4a-7ada-4c67-997e-089a64595677\\repo",
+      "status": "analysis",
+      "attempt": 1,
+      "createdAt": 1768915409042,
+      "updatedAt": 1768915409054
+    }
+  }
 }

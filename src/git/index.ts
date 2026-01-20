@@ -177,6 +177,32 @@ export class GitManager implements GitOperations {
   }
 
   /**
+   * Check if a branch exists locally
+   */
+  private async branchExists(git: SimpleGit, branchName: string): Promise<boolean> {
+    try {
+      const branches = await git.branchLocal();
+      return branches.all.includes(branchName);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Delete a local branch if it exists
+   */
+  private async deleteBranchIfExists(git: SimpleGit, branchName: string): Promise<void> {
+    if (await this.branchExists(git, branchName)) {
+      console.log(`[Git] Deleting existing local branch: ${branchName}`);
+      try {
+        await git.branch(['-D', branchName]);
+      } catch (error) {
+        console.warn(`[Git] Could not delete branch ${branchName}:`, error);
+      }
+    }
+  }
+
+  /**
    * Create a worktree for a specific request - this is very fast!
    * Uses mutex to prevent concurrent access to base repo
    */
@@ -192,6 +218,9 @@ export class GitManager implements GitOperations {
 
       // Update the base repo to get latest changes
       await this.updateBaseRepoInternal();
+
+      // Delete existing local branch if it exists (from a previous failed run)
+      await this.deleteBranchIfExists(git, featureBranchName);
 
       console.log(`[Git] Creating worktree at: ${worktreePath}`);
       console.log(`[Git] Feature branch: ${featureBranchName}`);
