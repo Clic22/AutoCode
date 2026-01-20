@@ -7,6 +7,8 @@ import { ClaudeOrchestrator } from './claude';
 import { Storage } from './storage';
 import path from 'path';
 
+const MAX_CONCURRENT_REQUESTS = 3;
+
 class AutoCode {
   private config: Config;
   private discord: DiscordBot;
@@ -15,7 +17,7 @@ class AutoCode {
   private gitlabClient: GitLabClient;
   private claudeOrchestrator: ClaudeOrchestrator;
   private storage: Storage;
-  private isProcessing: boolean = false;
+  private activeRequests: number = 0;
   private requestQueue: CodeRequest[] = [];
 
   constructor(config: Config, storage: Storage) {
@@ -69,12 +71,12 @@ class AutoCode {
     const pendingRequests = await this.discord.scanChannelForApprovedMessages();
 
     if (pendingRequests.length > 0) {
-      console.log(`[AutoCode] Found ${pendingRequests.length} pending requests, processing...`);
+      console.log(`[AutoCode] Found ${pendingRequests.length} pending requests, processing in parallel (max ${MAX_CONCURRENT_REQUESTS})...`);
       for (const request of pendingRequests) {
         this.requestQueue.push(request);
       }
-      // Start processing queue
-      await this.processQueue();
+      // Start processing queue (up to MAX_CONCURRENT_REQUESTS in parallel)
+      this.processNextRequests();
     } else {
       console.log('[AutoCode] No pending requests found.');
     }
@@ -88,23 +90,29 @@ class AutoCode {
   private async handleApprovedRequest(request: CodeRequest): Promise<void> {
     // Add to queue
     this.requestQueue.push(request);
-    console.log(`[AutoCode] Request ${request.id} added to queue (${this.requestQueue.length} pending)`);
+    console.log(`[AutoCode] Request ${request.id} added to queue (${this.requestQueue.length} pending, ${this.activeRequests} active)`);
 
-    // Process queue if not already processing
-    if (!this.isProcessing) {
-      await this.processQueue();
-    }
+    // Try to process more requests
+    this.processNextRequests();
   }
 
-  private async processQueue(): Promise<void> {
-    this.isProcessing = true;
-
-    while (this.requestQueue.length > 0) {
+  private processNextRequests(): void {
+    // Start new requests up to the max concurrent limit
+    while (this.requestQueue.length > 0 && this.activeRequests < MAX_CONCURRENT_REQUESTS) {
       const request = this.requestQueue.shift()!;
-      await this.processRequest(request);
-    }
+      this.activeRequests++;
 
-    this.isProcessing = false;
+      console.log(`[AutoCode] Starting request ${request.id} (${this.activeRequests}/${MAX_CONCURRENT_REQUESTS} active, ${this.requestQueue.length} queued)`);
+
+      // Process request without awaiting - runs in parallel
+      this.processRequest(request)
+        .finally(() => {
+          this.activeRequests--;
+          console.log(`[AutoCode] Request ${request.id} finished (${this.activeRequests}/${MAX_CONCURRENT_REQUESTS} active, ${this.requestQueue.length} queued)`);
+          // Try to start more requests when one finishes
+          this.processNextRequests();
+        });
+    }
   }
 
   private async processRequest(request: CodeRequest): Promise<void> {
