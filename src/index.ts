@@ -127,33 +127,36 @@ class AutoCode {
   }
 
   private async processRequest(request: CodeRequest): Promise<void> {
-    console.log('\n' + '='.repeat(50));
-    console.log(`[AutoCode] Processing request: ${request.id}`);
-    console.log(`[AutoCode] Content: ${request.content.substring(0, 200)}...`);
-    console.log('='.repeat(50));
-
     // Check if we have an existing workspace for this request
     let workspaceInfo = this.storage.getWorkspace(request.id);
     let workspace: Workspace | null = null;
-    let branchName: string;
+    let branchName: string = workspaceInfo?.branchName || '';
     let repoPath: string;
+
+    // Create log prefix with branch name
+    const getLogPrefix = () => branchName ? `[${branchName}]` : `[${request.id}]`;
+
+    console.log('\n' + '='.repeat(60));
+    console.log(`${getLogPrefix()} Processing request: ${request.id}`);
+    console.log(`${getLogPrefix()} Content: ${request.content.substring(0, 200)}...`);
+    console.log('='.repeat(60));
 
     try {
       if (workspaceInfo) {
         // Resume from existing workspace
-        console.log(`\n[AutoCode] Found existing workspace for ${request.id}`);
-        console.log(`[AutoCode] Status: ${workspaceInfo.status}, Attempt: ${workspaceInfo.attempt}`);
-        console.log(`[AutoCode] Workspace: ${workspaceInfo.workspacePath}`);
-        console.log(`[AutoCode] Branch: ${workspaceInfo.branchName}`);
+        console.log(`\n${getLogPrefix()} Found existing workspace`);
+        console.log(`${getLogPrefix()} Status: ${workspaceInfo.status}, Attempt: ${workspaceInfo.attempt}`);
+        console.log(`${getLogPrefix()} Workspace: ${workspaceInfo.workspacePath}`);
 
         // Verify workspace still exists on disk
         const workspaceExists = await this.directoryExists(workspaceInfo.workspacePath);
         const repoExists = await this.directoryExists(workspaceInfo.repoPath);
 
         if (!workspaceExists || !repoExists) {
-          console.log(`[AutoCode] Workspace directory missing, will recreate...`);
+          console.log(`${getLogPrefix()} Workspace directory missing, will recreate...`);
           await this.storage.deleteWorkspace(request.id);
           workspaceInfo = undefined;
+          branchName = '';
         } else {
           workspace = {
             id: request.id,
@@ -168,11 +171,11 @@ class AutoCode {
 
       if (!workspaceInfo) {
         // Create new workspace
-        console.log('\n[Step 1] Creating workspace...');
+        console.log(`\n${getLogPrefix()} [Step 1] Creating workspace...`);
         workspace = await this.workspaceManager.create(request.id);
 
-        console.log('\n[Step 2] Creating worktree from base repository...');
         branchName = this.generateBranchName(request.content);
+        console.log(`\n[${branchName}] [Step 2] Creating worktree from base repository...`);
         repoPath = await this.gitManager.createWorktree(workspace, branchName);
 
         // Track the new workspace
@@ -190,7 +193,7 @@ class AutoCode {
       await this.resumeFromStatus(request, workspaceInfo!, workspace!, branchName!, repoPath!);
 
     } catch (error) {
-      console.error(`[AutoCode] Error processing request ${request.id}:`, error);
+      console.error(`${getLogPrefix()} Error processing request:`, error);
 
       // Update workspace status to failed
       if (workspaceInfo) {
@@ -220,7 +223,9 @@ class AutoCode {
     repoPath: string
   ): Promise<void> {
     const status = workspaceInfo.status;
-    console.log(`\n[AutoCode] Resuming from status: ${status}`);
+    const log = (msg: string) => console.log(`[${branchName}] ${msg}`);
+
+    log(`Resuming from status: ${status}`);
 
     // Determine where to resume from
     let developmentPrompt = workspaceInfo.developmentPrompt;
@@ -229,11 +234,12 @@ class AutoCode {
     if (status === 'created' || status === 'analysis') {
       await this.storage.updateWorkspaceStatus(request.id, 'analysis');
 
-      console.log('\n[Phase 1] Analyzing request and generating development prompt...');
+      log('[Phase 1] Analyzing request and generating development prompt...');
       const analysisResult = await this.claudeOrchestrator.analyzeRequest(
         repoPath,
         request.content,
-        request.threadMessages
+        request.threadMessages,
+        branchName
       );
 
       if (!analysisResult.success) {
@@ -247,7 +253,7 @@ class AutoCode {
       await this.savePromptToFile(promptFilePath, developmentPrompt, request.content, request.threadMessages);
 
       await this.storage.updateWorkspaceStatus(request.id, 'analysis_done', { developmentPrompt });
-      console.log(`[Phase 1] Analysis complete. Prompt saved.`);
+      log('[Phase 1] Analysis complete. Prompt saved.');
     }
 
     // Phase 2 & 3: Implementation with review loop
@@ -287,11 +293,12 @@ class AutoCode {
         if (['analysis_done', 'implementation', 'review_failed'].includes(workspaceInfo.status) || attempt > 1) {
           await this.storage.updateWorkspaceStatus(request.id, 'implementation', { attempt });
 
-          console.log(`\n[Phase 2] Implementing feature (Attempt ${attempt}/${MAX_ATTEMPTS})...`);
+          log(`[Phase 2] Implementing feature (Attempt ${attempt}/${MAX_ATTEMPTS})...`);
           const implementationResult = await this.claudeOrchestrator.implementFeature(
             repoPath,
             developmentPrompt,
-            previousFeedback
+            previousFeedback,
+            branchName
           );
 
           if (!implementationResult.success) {
@@ -304,32 +311,32 @@ class AutoCode {
         // Phase 3: QA Review
         await this.storage.updateWorkspaceStatus(request.id, 'review');
 
-        console.log(`\n[Phase 3] QA Review (Attempt ${attempt}/${MAX_ATTEMPTS})...`);
-        const reviewResult = await this.claudeOrchestrator.reviewImplementation(repoPath, developmentPrompt);
+        log(`[Phase 3] QA Review (Attempt ${attempt}/${MAX_ATTEMPTS})...`);
+        const reviewResult = await this.claudeOrchestrator.reviewImplementation(repoPath, developmentPrompt, branchName);
 
         // Save review result
         const reviewFilePath = path.join(workspace.path, `review-attempt-${attempt}.md`);
         await this.saveReviewToFile(reviewFilePath, reviewResult, attempt);
 
         if (reviewResult.approved) {
-          console.log('\n[Phase 3] ✅ QA Review PASSED');
+          log('[Phase 3] ✅ QA Review PASSED');
           break;
         }
 
-        console.log('\n[Phase 3] ❌ QA Review FAILED - Issues found:');
+        log('[Phase 3] ❌ QA Review FAILED - Issues found:');
         reviewResult.issues.forEach((issue, i) => {
-          console.log(`  ${i + 1}. ${issue}`);
+          console.log(`[${branchName}]   ${i + 1}. ${issue}`);
         });
 
         await this.storage.updateWorkspaceStatus(request.id, 'review_failed', { attempt });
 
         if (attempt < MAX_ATTEMPTS) {
-          console.log(`\n[AutoCode] Preparing retry with feedback...`);
+          log('Preparing retry with feedback...');
           previousFeedback = this.buildFeedbackForRetry(reviewResult);
           attempt++;
           await this.storage.updateWorkspaceStatus(request.id, 'implementation', { attempt });
         } else {
-          console.log(`\n[AutoCode] ⚠️ Max attempts reached. Proceeding with last implementation.`);
+          log('⚠️ Max attempts reached. Proceeding with last implementation.');
           break;
         }
       }
@@ -337,11 +344,11 @@ class AutoCode {
 
     // Step 4: Commit changes
     if (['implementation_done', 'review', 'review_failed'].includes(status) || workspaceInfo.status === 'review') {
-      console.log('\n[Step 4] Checking for changes to commit...');
+      log('[Step 4] Checking for changes to commit...');
       const hasChanges = await this.gitManager.hasChanges(repoPath);
 
       if (!hasChanges) {
-        console.log('[AutoCode] No changes were made by Claude');
+        log('No changes were made by Claude');
         // Discord notification disabled for now
         // await this.discord.replyToMessage(
         //   request.channelId,
@@ -366,14 +373,14 @@ Request ID: ${request.id}`;
 
     // Step 5: Push to remote
     if (workspaceInfo.status === 'committed' || status === 'committed') {
-      console.log('\n[Step 5] Pushing to remote...');
+      log('[Step 5] Pushing to remote...');
       await this.gitManager.push(repoPath, branchName);
       await this.storage.updateWorkspaceStatus(request.id, 'pushed');
     }
 
     // Step 6: Create Merge Request
     if (workspaceInfo.status === 'pushed' || status === 'pushed') {
-      console.log('\n[Step 6] Creating Merge Request...');
+      log('[Step 6] Creating Merge Request...');
       const targetBranch = 'release/preview';
       const mrResult = await this.gitlabClient.createMergeRequest({
         sourceBranch: branchName,
@@ -393,6 +400,7 @@ ${request.content}
       });
 
       await this.storage.updateWorkspaceStatus(request.id, 'mr_created', { mrUrl: mrResult.webUrl });
+      log(`[Step 6] MR created: ${mrResult.webUrl}`);
     }
 
     // Step 7: Mark as completed
@@ -402,22 +410,9 @@ ${request.content}
     const finalWorkspaceInfo = this.storage.getWorkspace(request.id);
     const mrUrl = finalWorkspaceInfo?.mrUrl;
 
-    // Discord notification disabled for now
-    // console.log('\n[Step 7] Notifying Discord...');
-    // await this.discord.replyToMessage(
-    //   request.channelId,
-    //   request.messageId,
-    //   `✅ AutoCode has completed the implementation!
-    //
-    // 🔗 **Merge Request:** ${mrUrl}
-    //
-    // Please review the changes and merge when ready.`
-    // );
-
-    console.log('\n' + '='.repeat(50));
-    console.log(`[AutoCode] Request ${request.id} completed successfully!`);
-    console.log(`[AutoCode] MR: ${mrUrl}`);
-    console.log('='.repeat(50));
+    console.log('\n' + '='.repeat(60));
+    log(`✅ COMPLETED - MR: ${mrUrl || 'N/A'}`);
+    console.log('='.repeat(60));
   }
 
   private async savePromptToFile(

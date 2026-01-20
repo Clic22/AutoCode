@@ -26,28 +26,45 @@ export class ClaudeOrchestrator {
   /**
    * Phase 1: Analyze the Discord conversation and generate a clear development prompt
    */
-  async analyzeRequest(repoPath: string, discordContent: string, threadMessages?: string[]): Promise<ClaudeResult> {
-    console.log(`[Claude Phase 1] Analyzing request and generating development prompt...`);
+  async analyzeRequest(
+    repoPath: string,
+    discordContent: string,
+    threadMessages?: string[],
+    branchName?: string
+  ): Promise<ClaudeResult> {
+    const log = (msg: string) => console.log(branchName ? `[${branchName}] ${msg}` : `[Claude] ${msg}`);
+    log('Starting analysis (Phase 1)...');
     const analysisPrompt = this.buildAnalysisPrompt(discordContent, threadMessages);
-    return this.execute(repoPath, analysisPrompt);
+    return this.execute(repoPath, analysisPrompt, branchName);
   }
 
   /**
    * Phase 2: Implement the feature based on the refined prompt
    */
-  async implementFeature(repoPath: string, developmentPrompt: string, previousFeedback?: string): Promise<ClaudeResult> {
-    console.log(`[Claude Phase 2] Implementing feature...`);
+  async implementFeature(
+    repoPath: string,
+    developmentPrompt: string,
+    previousFeedback?: string,
+    branchName?: string
+  ): Promise<ClaudeResult> {
+    const log = (msg: string) => console.log(branchName ? `[${branchName}] ${msg}` : `[Claude] ${msg}`);
+    log('Starting implementation (Phase 2)...');
     const implementationPrompt = this.buildImplementationPrompt(developmentPrompt, previousFeedback);
-    return this.execute(repoPath, implementationPrompt);
+    return this.execute(repoPath, implementationPrompt, branchName);
   }
 
   /**
    * Phase 3: QA Review - Check code quality, potential issues, and alignment with requirements
    */
-  async reviewImplementation(repoPath: string, developmentPrompt: string): Promise<ReviewResult> {
-    console.log(`[Claude Phase 3] Reviewing implementation...`);
+  async reviewImplementation(
+    repoPath: string,
+    developmentPrompt: string,
+    branchName?: string
+  ): Promise<ReviewResult> {
+    const log = (msg: string) => console.log(branchName ? `[${branchName}] ${msg}` : `[Claude] ${msg}`);
+    log('Starting QA review (Phase 3)...');
     const reviewPrompt = this.buildReviewPrompt(developmentPrompt);
-    const result = await this.execute(repoPath, reviewPrompt);
+    const result = await this.execute(repoPath, reviewPrompt, branchName);
 
     if (!result.success) {
       return {
@@ -61,23 +78,26 @@ export class ClaudeOrchestrator {
   }
 
   /**
-   * Full three-phase execution with review loop
+   * Full three-phase execution with review loop (legacy method, kept for compatibility)
    */
   async executeTask(
     repoPath: string,
     discordContent: string,
     threadMessages?: string[],
-    workspacePath?: string
+    workspacePath?: string,
+    branchName?: string
   ): Promise<ClaudeResult> {
+    const log = (msg: string) => console.log(branchName ? `[${branchName}] ${msg}` : `[Claude] ${msg}`);
+
     // Phase 1: Analysis
     console.log('\n' + '='.repeat(50));
-    console.log('[Claude] PHASE 1: Analyzing request...');
+    log('PHASE 1: Analyzing request...');
     console.log('='.repeat(50));
 
-    const analysisResult = await this.analyzeRequest(repoPath, discordContent, threadMessages);
+    const analysisResult = await this.analyzeRequest(repoPath, discordContent, threadMessages, branchName);
 
     if (!analysisResult.success) {
-      console.error('[Claude] Phase 1 failed');
+      log('Phase 1 failed');
       return analysisResult;
     }
 
@@ -86,9 +106,9 @@ export class ClaudeOrchestrator {
     // Save the development prompt to a file in the workspace
     const promptFilePath = path.join(workspacePath || path.dirname(repoPath), 'development-prompt.md');
     await this.savePromptToFile(promptFilePath, developmentPrompt, discordContent, threadMessages);
-    console.log(`\n[Claude] Development prompt saved to: ${promptFilePath}`);
+    log(`Development prompt saved to: ${promptFilePath}`);
 
-    console.log('\n[Claude] Generated development prompt:');
+    log('Generated development prompt:');
     console.log('-'.repeat(40));
     console.log(developmentPrompt.substring(0, 500) + (developmentPrompt.length > 500 ? '...' : ''));
     console.log('-'.repeat(40));
@@ -101,46 +121,46 @@ export class ClaudeOrchestrator {
     while (attempt <= MAX_IMPLEMENTATION_ATTEMPTS) {
       // Phase 2: Implementation
       console.log('\n' + '='.repeat(50));
-      console.log(`[Claude] PHASE 2: Implementing feature (Attempt ${attempt}/${MAX_IMPLEMENTATION_ATTEMPTS})...`);
+      log(`PHASE 2: Implementing feature (Attempt ${attempt}/${MAX_IMPLEMENTATION_ATTEMPTS})...`);
       console.log('='.repeat(50));
 
-      implementationResult = await this.implementFeature(repoPath, developmentPrompt, previousFeedback);
+      implementationResult = await this.implementFeature(repoPath, developmentPrompt, previousFeedback, branchName);
 
       if (!implementationResult.success) {
-        console.error('[Claude] Phase 2 failed');
+        log('Phase 2 failed');
         return implementationResult;
       }
 
       // Phase 3: QA Review
       console.log('\n' + '='.repeat(50));
-      console.log(`[Claude] PHASE 3: QA Review (Attempt ${attempt}/${MAX_IMPLEMENTATION_ATTEMPTS})...`);
+      log(`PHASE 3: QA Review (Attempt ${attempt}/${MAX_IMPLEMENTATION_ATTEMPTS})...`);
       console.log('='.repeat(50));
 
-      const reviewResult = await this.reviewImplementation(repoPath, developmentPrompt);
+      const reviewResult = await this.reviewImplementation(repoPath, developmentPrompt, branchName);
 
       // Save review result
       const reviewFilePath = path.join(workspacePath || path.dirname(repoPath), `review-attempt-${attempt}.md`);
       await this.saveReviewToFile(reviewFilePath, reviewResult, attempt);
 
       if (reviewResult.approved) {
-        console.log('\n[Claude] ✅ QA Review PASSED - Implementation approved!');
+        log('✅ QA Review PASSED - Implementation approved!');
         return implementationResult;
       }
 
-      console.log('\n[Claude] ❌ QA Review FAILED - Issues found:');
+      log('❌ QA Review FAILED - Issues found:');
       reviewResult.issues.forEach((issue, i) => {
         console.log(`  ${i + 1}. ${issue}`);
       });
 
       if (attempt < MAX_IMPLEMENTATION_ATTEMPTS) {
-        console.log(`\n[Claude] Preparing to re-implement with feedback...`);
+        log('Preparing to re-implement with feedback...');
         previousFeedback = this.buildFeedbackForRetry(reviewResult);
       }
 
       attempt++;
     }
 
-    console.log(`\n[Claude] ⚠️ Max attempts (${MAX_IMPLEMENTATION_ATTEMPTS}) reached. Proceeding with last implementation.`);
+    log(`⚠️ Max attempts (${MAX_IMPLEMENTATION_ATTEMPTS}) reached. Proceeding with last implementation.`);
     return implementationResult;
   }
 
@@ -376,19 +396,20 @@ You MUST output your review in this exact format:
 Now review the implementation:`;
   }
 
-  private async execute(repoPath: string, prompt: string): Promise<ClaudeResult> {
+  private async execute(repoPath: string, prompt: string, branchName?: string): Promise<ClaudeResult> {
+    const log = (msg: string) => console.log(branchName ? `[${branchName}] ${msg}` : `[Claude] ${msg}`);
+
     // Write prompt to a temporary file
     const promptFile = path.join(repoPath, '.autocode-prompt.txt');
     await fs.writeFile(promptFile, prompt, 'utf-8');
 
-    console.log(`[Claude] Starting CLI in: ${repoPath}`);
-    console.log(`[Claude] Prompt saved to: ${promptFile}`);
-    console.log(`[Claude] Prompt length: ${prompt.length} characters`);
+    log(`Starting CLI in: ${repoPath}`);
+    log(`Prompt length: ${prompt.length} characters`);
 
     return new Promise((resolve) => {
       const args = ['--print', '--dangerously-skip-permissions'];
 
-      console.log(`[Claude] Executing: ${this.cliPath} ${args.join(' ')}`);
+      log(`Executing: ${this.cliPath} ${args.join(' ')}`);
 
       const proc = spawn(this.cliPath, args, {
         cwd: repoPath,
@@ -411,7 +432,11 @@ Now review the implementation:`;
       proc.stdout.on('data', (data: Buffer) => {
         const text = data.toString();
         stdout += text;
-        process.stdout.write(text);
+        // Prefix output with branch name
+        const prefixedText = branchName
+          ? text.split('\n').map(line => line ? `[${branchName}] ${line}` : '').join('\n')
+          : text;
+        process.stdout.write(prefixedText);
       });
 
       proc.stderr.on('data', (data: Buffer) => {
@@ -419,7 +444,7 @@ Now review the implementation:`;
         stderr += text;
         // Filter out UI noise
         if (text.trim() && !text.includes('─') && !text.includes('│') && !text.includes('╭') && !text.includes('╰')) {
-          process.stderr.write(`[Claude] ${text}`);
+          log(`stderr: ${text.trim()}`);
         }
       });
 
@@ -431,7 +456,7 @@ Now review the implementation:`;
           // Ignore cleanup errors
         }
 
-        console.log(`\n[Claude] Process exited with code: ${code}`);
+        log(`Process exited with code: ${code}`);
 
         if (code === 0) {
           resolve({
@@ -448,7 +473,7 @@ Now review the implementation:`;
       });
 
       proc.on('error', (error) => {
-        console.error(`[Claude] Failed to start process:`, error);
+        log(`Failed to start process: ${error.message}`);
         resolve({
           success: false,
           output: '',
