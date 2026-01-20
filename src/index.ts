@@ -4,8 +4,9 @@ import { WorkspaceManager, Workspace } from './workspace';
 import { GitManager } from './git';
 import { GitLabClient } from './gitlab';
 import { ClaudeOrchestrator } from './claude';
-import { Storage } from './storage';
+import { Storage, WorkspaceInfo, WorkspaceStatus } from './storage';
 import path from 'path';
+import fs from 'fs/promises';
 
 const MAX_CONCURRENT_REQUESTS = 3;
 
@@ -66,6 +67,16 @@ class AutoCode {
     // Connect to Discord
     await this.discord.connect(this.config.discord.botToken);
 
+    // Check for incomplete workspaces from previous runs
+    console.log('\n[AutoCode] Checking for incomplete workspaces to resume...');
+    const incompleteWorkspaces = this.storage.getIncompleteWorkspaces();
+    if (incompleteWorkspaces.length > 0) {
+      console.log(`[AutoCode] Found ${incompleteWorkspaces.length} incomplete workspace(s) to resume`);
+      for (const ws of incompleteWorkspaces) {
+        console.log(`  - ${ws.messageId}: status=${ws.status}, branch=${ws.branchName}`);
+      }
+    }
+
     // Scan channel for existing approved messages
     console.log('\n[AutoCode] Scanning for pending approved requests...');
     const pendingRequests = await this.discord.scanChannelForApprovedMessages();
@@ -121,33 +132,212 @@ class AutoCode {
     console.log(`[AutoCode] Content: ${request.content.substring(0, 200)}...`);
     console.log('='.repeat(50));
 
+    // Check if we have an existing workspace for this request
+    let workspaceInfo = this.storage.getWorkspace(request.id);
     let workspace: Workspace | null = null;
+    let branchName: string;
+    let repoPath: string;
 
     try {
-      // Step 1: Create workspace
-      console.log('\n[Step 1] Creating workspace...');
-      workspace = await this.workspaceManager.create(request.id);
+      if (workspaceInfo) {
+        // Resume from existing workspace
+        console.log(`\n[AutoCode] Found existing workspace for ${request.id}`);
+        console.log(`[AutoCode] Status: ${workspaceInfo.status}, Attempt: ${workspaceInfo.attempt}`);
+        console.log(`[AutoCode] Workspace: ${workspaceInfo.workspacePath}`);
+        console.log(`[AutoCode] Branch: ${workspaceInfo.branchName}`);
 
-      // Step 2: Create worktree with feature branch (fast - uses base repo)
-      console.log('\n[Step 2] Creating worktree from base repository...');
-      const branchName = this.generateBranchName(request.content);
-      const repoPath = await this.gitManager.createWorktree(workspace, branchName);
+        // Verify workspace still exists on disk
+        const workspaceExists = await this.directoryExists(workspaceInfo.workspacePath);
+        const repoExists = await this.directoryExists(workspaceInfo.repoPath);
 
-      // Step 3: Execute Claude CLI (three-phase: analysis + implementation + review)
-      console.log('\n[Step 3] Executing Claude CLI (three-phase process)...');
-      const claudeResult = await this.claudeOrchestrator.executeTask(
-        repoPath,
-        request.content,
-        request.threadMessages,
-        workspace.path  // Save development prompt in workspace
-      );
-
-      if (!claudeResult.success) {
-        throw new Error(`Claude execution failed: ${claudeResult.error}`);
+        if (!workspaceExists || !repoExists) {
+          console.log(`[AutoCode] Workspace directory missing, will recreate...`);
+          await this.storage.deleteWorkspace(request.id);
+          workspaceInfo = undefined;
+        } else {
+          workspace = {
+            id: request.id,
+            path: workspaceInfo.workspacePath,
+            requestId: request.id,
+            createdAt: new Date(workspaceInfo.createdAt),
+          };
+          branchName = workspaceInfo.branchName;
+          repoPath = workspaceInfo.repoPath;
+        }
       }
 
-      // Step 4: Check for changes and commit
-      console.log('\n[Step 4] Committing changes...');
+      if (!workspaceInfo) {
+        // Create new workspace
+        console.log('\n[Step 1] Creating workspace...');
+        workspace = await this.workspaceManager.create(request.id);
+
+        console.log('\n[Step 2] Creating worktree from base repository...');
+        branchName = this.generateBranchName(request.content);
+        repoPath = await this.gitManager.createWorktree(workspace, branchName);
+
+        // Track the new workspace
+        workspaceInfo = await this.storage.createWorkspace({
+          messageId: request.id,
+          workspacePath: workspace.path,
+          branchName,
+          repoPath,
+          status: 'created',
+          attempt: 1,
+        });
+      }
+
+      // Resume based on current status
+      await this.resumeFromStatus(request, workspaceInfo!, workspace!, branchName!, repoPath!);
+
+    } catch (error) {
+      console.error(`[AutoCode] Error processing request ${request.id}:`, error);
+
+      // Update workspace status to failed
+      if (workspaceInfo) {
+        await this.storage.updateWorkspaceStatus(request.id, 'failed', {
+          lastError: error instanceof Error ? error.message : 'Unknown error',
+        });
+      }
+
+      // Notify Discord of failure
+      try {
+        await this.discord.replyToMessage(
+          request.channelId,
+          request.messageId,
+          `❌ AutoCode encountered an error while processing this request:\n\`\`\`\n${error instanceof Error ? error.message : 'Unknown error'}\n\`\`\``
+        );
+      } catch (discordError) {
+        console.error('[AutoCode] Failed to notify Discord of error:', discordError);
+      }
+    }
+  }
+
+  private async resumeFromStatus(
+    request: CodeRequest,
+    workspaceInfo: WorkspaceInfo,
+    workspace: Workspace,
+    branchName: string,
+    repoPath: string
+  ): Promise<void> {
+    const status = workspaceInfo.status;
+    console.log(`\n[AutoCode] Resuming from status: ${status}`);
+
+    // Determine where to resume from
+    let developmentPrompt = workspaceInfo.developmentPrompt;
+
+    // Phase 1: Analysis (if not done yet)
+    if (status === 'created' || status === 'analysis') {
+      await this.storage.updateWorkspaceStatus(request.id, 'analysis');
+
+      console.log('\n[Phase 1] Analyzing request and generating development prompt...');
+      const analysisResult = await this.claudeOrchestrator.analyzeRequest(
+        repoPath,
+        request.content,
+        request.threadMessages
+      );
+
+      if (!analysisResult.success) {
+        throw new Error(`Analysis failed: ${analysisResult.error}`);
+      }
+
+      developmentPrompt = analysisResult.output.trim();
+
+      // Save the development prompt
+      const promptFilePath = path.join(workspace.path, 'development-prompt.md');
+      await this.savePromptToFile(promptFilePath, developmentPrompt, request.content, request.threadMessages);
+
+      await this.storage.updateWorkspaceStatus(request.id, 'analysis_done', { developmentPrompt });
+      console.log(`[Phase 1] Analysis complete. Prompt saved.`);
+    }
+
+    // Phase 2 & 3: Implementation with review loop
+    if (['analysis_done', 'implementation', 'implementation_done', 'review', 'review_failed'].includes(status)) {
+      if (!developmentPrompt) {
+        // Try to load from file
+        const promptFilePath = path.join(workspace.path, 'development-prompt.md');
+        try {
+          const content = await fs.readFile(promptFilePath, 'utf-8');
+          // Extract just the prompt part (after the header)
+          const match = content.match(/Generated: .+\n\n([\s\S]+)$/);
+          developmentPrompt = match ? match[1].trim() : content;
+        } catch {
+          throw new Error('Development prompt not found. Cannot resume implementation.');
+        }
+      }
+
+      const MAX_ATTEMPTS = 3;
+      let attempt = workspaceInfo.attempt || 1;
+      let previousFeedback: string | undefined;
+
+      // If we're resuming from a failed review, prepare feedback
+      if (status === 'review_failed') {
+        const reviewFilePath = path.join(workspace.path, `review-attempt-${attempt}.md`);
+        try {
+          const reviewContent = await fs.readFile(reviewFilePath, 'utf-8');
+          previousFeedback = this.extractFeedbackFromReview(reviewContent);
+          attempt++; // Move to next attempt
+          await this.storage.updateWorkspaceStatus(request.id, 'implementation', { attempt });
+        } catch {
+          // No previous review found, start fresh
+        }
+      }
+
+      while (attempt <= MAX_ATTEMPTS) {
+        // Phase 2: Implementation
+        if (['analysis_done', 'implementation', 'review_failed'].includes(workspaceInfo.status) || attempt > 1) {
+          await this.storage.updateWorkspaceStatus(request.id, 'implementation', { attempt });
+
+          console.log(`\n[Phase 2] Implementing feature (Attempt ${attempt}/${MAX_ATTEMPTS})...`);
+          const implementationResult = await this.claudeOrchestrator.implementFeature(
+            repoPath,
+            developmentPrompt,
+            previousFeedback
+          );
+
+          if (!implementationResult.success) {
+            throw new Error(`Implementation failed: ${implementationResult.error}`);
+          }
+
+          await this.storage.updateWorkspaceStatus(request.id, 'implementation_done');
+        }
+
+        // Phase 3: QA Review
+        await this.storage.updateWorkspaceStatus(request.id, 'review');
+
+        console.log(`\n[Phase 3] QA Review (Attempt ${attempt}/${MAX_ATTEMPTS})...`);
+        const reviewResult = await this.claudeOrchestrator.reviewImplementation(repoPath, developmentPrompt);
+
+        // Save review result
+        const reviewFilePath = path.join(workspace.path, `review-attempt-${attempt}.md`);
+        await this.saveReviewToFile(reviewFilePath, reviewResult, attempt);
+
+        if (reviewResult.approved) {
+          console.log('\n[Phase 3] ✅ QA Review PASSED');
+          break;
+        }
+
+        console.log('\n[Phase 3] ❌ QA Review FAILED - Issues found:');
+        reviewResult.issues.forEach((issue, i) => {
+          console.log(`  ${i + 1}. ${issue}`);
+        });
+
+        await this.storage.updateWorkspaceStatus(request.id, 'review_failed', { attempt });
+
+        if (attempt < MAX_ATTEMPTS) {
+          console.log(`\n[AutoCode] Preparing retry with feedback...`);
+          previousFeedback = this.buildFeedbackForRetry(reviewResult);
+          attempt++;
+          await this.storage.updateWorkspaceStatus(request.id, 'implementation', { attempt });
+        } else {
+          console.log(`\n[AutoCode] ⚠️ Max attempts reached. Proceeding with last implementation.`);
+          break;
+        }
+      }
+    }
+
+    // Step 4: Commit changes
+    if (['implementation_done', 'review', 'review_failed'].includes(status) || workspaceInfo.status === 'review') {
+      console.log('\n[Step 4] Checking for changes to commit...');
       const hasChanges = await this.gitManager.hasChanges(repoPath);
 
       if (!hasChanges) {
@@ -157,7 +347,7 @@ class AutoCode {
           request.messageId,
           `⚠️ AutoCode processed the request but no code changes were made.`
         );
-        // Mark as processed even if no changes
+        await this.storage.updateWorkspaceStatus(request.id, 'completed');
         await this.storage.markProcessed(request.id);
         return;
       }
@@ -170,12 +360,18 @@ Approved by: ${request.approvedBy}
 Request ID: ${request.id}`;
 
       await this.gitManager.commitAll(repoPath, commitMessage);
+      await this.storage.updateWorkspaceStatus(request.id, 'committed');
+    }
 
-      // Step 5: Push to remote
+    // Step 5: Push to remote
+    if (workspaceInfo.status === 'committed' || status === 'committed') {
       console.log('\n[Step 5] Pushing to remote...');
       await this.gitManager.push(repoPath, branchName);
+      await this.storage.updateWorkspaceStatus(request.id, 'pushed');
+    }
 
-      // Step 6: Create Merge Request
+    // Step 6: Create Merge Request
+    if (workspaceInfo.status === 'pushed' || status === 'pushed') {
       console.log('\n[Step 6] Creating Merge Request...');
       const targetBranch = 'release/preview';
       const mrResult = await this.gitlabClient.createMergeRequest({
@@ -195,46 +391,114 @@ ${request.content}
 *This merge request was automatically generated by AutoCode.*`,
       });
 
-      // Step 7: Mark as processed in persistent storage
-      await this.storage.markProcessed(request.id);
+      await this.storage.updateWorkspaceStatus(request.id, 'mr_created', { mrUrl: mrResult.webUrl });
+    }
 
-      // Step 8: Notify Discord
-      console.log('\n[Step 8] Notifying Discord...');
-      await this.discord.replyToMessage(
-        request.channelId,
-        request.messageId,
-        `✅ AutoCode has completed the implementation!
+    // Step 7: Mark as completed and notify Discord
+    await this.storage.markProcessed(request.id);
+    await this.storage.updateWorkspaceStatus(request.id, 'completed');
 
-🔗 **Merge Request:** ${mrResult.webUrl}
+    const finalWorkspaceInfo = this.storage.getWorkspace(request.id);
+    const mrUrl = finalWorkspaceInfo?.mrUrl;
+
+    console.log('\n[Step 7] Notifying Discord...');
+    await this.discord.replyToMessage(
+      request.channelId,
+      request.messageId,
+      `✅ AutoCode has completed the implementation!
+
+🔗 **Merge Request:** ${mrUrl}
 
 Please review the changes and merge when ready.`
-      );
+    );
 
-      console.log('\n' + '='.repeat(50));
-      console.log(`[AutoCode] Request ${request.id} completed successfully!`);
-      console.log(`[AutoCode] MR: ${mrResult.webUrl}`);
-      console.log('='.repeat(50));
+    console.log('\n' + '='.repeat(50));
+    console.log(`[AutoCode] Request ${request.id} completed successfully!`);
+    console.log(`[AutoCode] MR: ${mrUrl}`);
+    console.log('='.repeat(50));
+  }
 
-    } catch (error) {
-      console.error(`[AutoCode] Error processing request ${request.id}:`, error);
+  private async savePromptToFile(
+    filePath: string,
+    developmentPrompt: string,
+    originalContent: string,
+    threadMessages?: string[]
+  ): Promise<void> {
+    const content = `# AutoCode Development Prompt
 
-      // Notify Discord of failure
-      try {
-        await this.discord.replyToMessage(
-          request.channelId,
-          request.messageId,
-          `❌ AutoCode encountered an error while processing this request:\n\`\`\`\n${error instanceof Error ? error.message : 'Unknown error'}\n\`\`\``
-        );
-      } catch (discordError) {
-        console.error('[AutoCode] Failed to notify Discord of error:', discordError);
-      }
+Generated: ${new Date().toISOString()}
 
-      // Don't mark as processed on error, so it can be retried
-    } finally {
-      // Cleanup workspace (optional - uncomment to auto-cleanup)
-      // if (workspace) {
-      //   await this.workspaceManager.cleanup(workspace);
-      // }
+${developmentPrompt}
+`;
+    await fs.writeFile(filePath, content, 'utf-8');
+  }
+
+  private async saveReviewToFile(
+    filePath: string,
+    reviewResult: { approved: boolean; feedback: string; issues: string[] },
+    attempt: number
+  ): Promise<void> {
+    const content = `# AutoCode QA Review - Attempt ${attempt}
+
+Generated: ${new Date().toISOString()}
+
+## Status: ${reviewResult.approved ? '✅ APPROVED' : '❌ REJECTED'}
+
+## Issues Found
+${reviewResult.issues.length > 0 ? reviewResult.issues.map((issue, i) => `${i + 1}. ${issue}`).join('\n') : 'No issues found.'}
+
+## Full Review Output
+
+${reviewResult.feedback}
+`;
+    await fs.writeFile(filePath, content, 'utf-8');
+  }
+
+  private extractFeedbackFromReview(reviewContent: string): string {
+    // Extract issues from saved review file
+    const issuesMatch = reviewContent.match(/## Issues Found\n([\s\S]*?)(?=\n## |$)/);
+    if (issuesMatch) {
+      return `
+## Previous Implementation Review - FAILED
+
+The previous implementation was reviewed and the following issues were found:
+
+${issuesMatch[1].trim()}
+
+## Instructions for This Attempt
+
+Please address ALL the issues listed above.
+`;
+    }
+    return '';
+  }
+
+  private buildFeedbackForRetry(reviewResult: { issues: string[] }): string {
+    return `
+## Previous Implementation Review - FAILED
+
+The previous implementation was reviewed and the following issues were found:
+
+${reviewResult.issues.map((issue, i) => `${i + 1}. ${issue}`).join('\n')}
+
+## Instructions for This Attempt
+
+Please address ALL the issues listed above. Focus on:
+- Fixing any potential crashes or null pointer issues
+- Addressing performance concerns
+- Ensuring the implementation matches the requirements
+- Following coding best practices
+
+Do NOT repeat the same mistakes.
+`;
+  }
+
+  private async directoryExists(dirPath: string): Promise<boolean> {
+    try {
+      const stat = await fs.stat(dirPath);
+      return stat.isDirectory();
+    } catch {
+      return false;
     }
   }
 
