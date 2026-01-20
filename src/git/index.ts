@@ -1,9 +1,11 @@
 import simpleGit, { SimpleGit } from 'simple-git';
 import path from 'path';
+import fs from 'fs/promises';
 import { Workspace } from '../workspace';
 
 export interface GitOperations {
-  clone(repoUrl: string, workspace: Workspace): Promise<string>;
+  ensureBaseRepo(): Promise<void>;
+  createWorktree(workspace: Workspace, branchName: string): Promise<string>;
   createBranch(repoPath: string, branchName: string): Promise<void>;
   commitAll(repoPath: string, message: string): Promise<void>;
   push(repoPath: string, branchName: string): Promise<void>;
@@ -11,66 +13,149 @@ export interface GitOperations {
 
 export class GitManager implements GitOperations {
   private gitlabToken: string;
+  private repoUrl: string;
+  private baseRepoPath: string;
+  private baseBranch: string;
 
-  constructor(gitlabToken: string) {
+  constructor(
+    gitlabToken: string,
+    repoUrl: string,
+    workspacesDir: string,
+    baseBranch: string = 'release/preview'
+  ) {
     this.gitlabToken = gitlabToken;
+    this.repoUrl = repoUrl;
+    this.baseRepoPath = path.join(workspacesDir, 'base-repo');
+    this.baseBranch = baseBranch;
   }
 
   private getAuthenticatedUrl(repoUrl: string): string {
-    // Convert http://gitlab.totemmedia.com/Stephane/qtvghd.git
-    // to http://oauth2:TOKEN@gitlab.totemmedia.com/Stephane/qtvghd.git
     const url = new URL(repoUrl);
     url.username = 'oauth2';
     url.password = this.gitlabToken;
     return url.toString();
   }
 
-  async clone(repoUrl: string, workspace: Workspace): Promise<string> {
-    const git = simpleGit({ progress: this.logProgress.bind(this) });
-    const repoPath = path.join(workspace.path, 'repo');
-    const authUrl = this.getAuthenticatedUrl(repoUrl);
+  /**
+   * Ensure the base repository exists and is up to date
+   * This is called once at startup
+   */
+  async ensureBaseRepo(): Promise<void> {
+    const authUrl = this.getAuthenticatedUrl(this.repoUrl);
 
-    console.log(`[Git] Cloning repository to: ${repoPath}`);
-    console.log(`[Git] This may take a while for large repos with submodules...`);
+    // Check if base repo exists
+    const exists = await this.directoryExists(this.baseRepoPath);
 
-    // Clone with submodules
-    await git.clone(authUrl, repoPath, [
-      '--recurse-submodules',
-      '--shallow-submodules',
-      '--progress',
-    ]);
-    console.log(`[Git] Clone complete`);
+    if (exists) {
+      console.log('[Git] Base repo exists, fetching latest changes...');
+      const git = simpleGit(this.baseRepoPath);
 
-    // Initialize submodules if any were missed
-    console.log(`[Git] Updating submodules...`);
-    const repoGit = simpleGit(repoPath, { progress: this.logProgress.bind(this) });
-    await repoGit.submoduleUpdate(['--init', '--recursive']);
-    console.log(`[Git] Submodules updated`);
+      try {
+        // Fetch all branches and tags
+        await git.fetch(['--all', '--prune']);
 
-    // Checkout release/preview branch
-    console.log(`[Git] Checking out release/preview branch...`);
-    await repoGit.checkout('release/preview');
-    await repoGit.submoduleUpdate(['--init', '--recursive']);
+        // Update submodules
+        console.log('[Git] Updating submodules in base repo...');
+        await git.submoduleUpdate(['--init', '--recursive']);
 
-    console.log(`[Git] Repository cloned with submodules on release/preview branch`);
-    return repoPath;
+        console.log('[Git] Base repo updated successfully');
+      } catch (error) {
+        console.error('[Git] Error updating base repo, will re-clone:', error);
+        await fs.rm(this.baseRepoPath, { recursive: true, force: true });
+        await this.cloneBaseRepo(authUrl);
+      }
+    } else {
+      await this.cloneBaseRepo(authUrl);
+    }
   }
 
-  private logProgress(event: { method: string; stage: string; progress: number }): void {
-    if (event.progress) {
-      process.stdout.write(`\r[Git] ${event.method} ${event.stage}: ${event.progress}%   `);
-      if (event.progress === 100) {
-        console.log('');
-      }
+  private async cloneBaseRepo(authUrl: string): Promise<void> {
+    console.log('[Git] Cloning base repository (this only happens once)...');
+    console.log('[Git] This may take a while for large repos with submodules...');
+
+    const git = simpleGit({ progress: this.logProgress.bind(this) });
+
+    // Clone with submodules
+    await git.clone(authUrl, this.baseRepoPath, [
+      '--recurse-submodules',
+      '--progress',
+    ]);
+
+    console.log('[Git] Base repo cloned');
+
+    // Checkout the base branch
+    const repoGit = simpleGit(this.baseRepoPath);
+    console.log(`[Git] Checking out ${this.baseBranch}...`);
+    await repoGit.checkout(this.baseBranch);
+    await repoGit.submoduleUpdate(['--init', '--recursive']);
+
+    console.log('[Git] Base repository ready');
+  }
+
+  /**
+   * Create a worktree for a specific request - this is very fast!
+   */
+  async createWorktree(workspace: Workspace, featureBranchName: string): Promise<string> {
+    const worktreePath = path.join(workspace.path, 'repo');
+    const git = simpleGit(this.baseRepoPath);
+
+    console.log(`[Git] Creating worktree at: ${worktreePath}`);
+    console.log(`[Git] Feature branch: ${featureBranchName}`);
+
+    // Create worktree with a new branch based on the base branch
+    // git worktree add <path> -b <new-branch> <start-point>
+    await git.raw([
+      'worktree',
+      'add',
+      worktreePath,
+      '-b',
+      featureBranchName,
+      `origin/${this.baseBranch}`,
+    ]);
+
+    console.log('[Git] Worktree created');
+
+    // Initialize submodules in the worktree
+    console.log('[Git] Initializing submodules in worktree...');
+    const worktreeGit = simpleGit(worktreePath);
+    await worktreeGit.submoduleUpdate(['--init', '--recursive']);
+
+    console.log('[Git] Worktree ready with submodules');
+    return worktreePath;
+  }
+
+  /**
+   * Clean up a worktree when done
+   */
+  async removeWorktree(workspace: Workspace): Promise<void> {
+    const worktreePath = path.join(workspace.path, 'repo');
+
+    try {
+      const git = simpleGit(this.baseRepoPath);
+      await git.raw(['worktree', 'remove', worktreePath, '--force']);
+      console.log(`[Git] Worktree removed: ${worktreePath}`);
+    } catch (error) {
+      console.error(`[Git] Error removing worktree:`, error);
+    }
+  }
+
+  /**
+   * Prune stale worktrees (e.g., after crashes)
+   */
+  async pruneWorktrees(): Promise<void> {
+    try {
+      const git = simpleGit(this.baseRepoPath);
+      await git.raw(['worktree', 'prune']);
+      console.log('[Git] Stale worktrees pruned');
+    } catch (error) {
+      // Ignore if base repo doesn't exist yet
     }
   }
 
   async createBranch(repoPath: string, branchName: string): Promise<void> {
-    const git = simpleGit(repoPath);
-
-    // Create and checkout new branch
-    await git.checkoutLocalBranch(branchName);
-    console.log(`[Git] Created and checked out branch: ${branchName}`);
+    // With worktree approach, the branch is already created
+    // This method is kept for compatibility but does nothing
+    console.log(`[Git] Branch ${branchName} already created with worktree`);
   }
 
   async commitAll(repoPath: string, message: string): Promise<void> {
@@ -93,7 +178,6 @@ export class GitManager implements GitOperations {
 
   async push(repoPath: string, branchName: string): Promise<void> {
     const git = simpleGit(repoPath);
-
     await git.push('origin', branchName, ['--set-upstream']);
     console.log(`[Git] Pushed branch: ${branchName}`);
   }
@@ -102,5 +186,23 @@ export class GitManager implements GitOperations {
     const git = simpleGit(repoPath);
     const status = await git.status();
     return status.files.length > 0;
+  }
+
+  private async directoryExists(dirPath: string): Promise<boolean> {
+    try {
+      const stat = await fs.stat(dirPath);
+      return stat.isDirectory();
+    } catch {
+      return false;
+    }
+  }
+
+  private logProgress(event: { method: string; stage: string; progress: number }): void {
+    if (event.progress) {
+      process.stdout.write(`\r[Git] ${event.method} ${event.stage}: ${event.progress}%   `);
+      if (event.progress === 100) {
+        console.log('');
+      }
+    }
   }
 }
