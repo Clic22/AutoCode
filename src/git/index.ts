@@ -26,21 +26,26 @@ export class GitManager implements GitOperations {
   }
 
   async clone(repoUrl: string, workspace: Workspace): Promise<string> {
-    const git = simpleGit();
+    const git = simpleGit({ progress: this.logProgress.bind(this) });
     const repoPath = path.join(workspace.path, 'repo');
     const authUrl = this.getAuthenticatedUrl(repoUrl);
 
     console.log(`[Git] Cloning repository to: ${repoPath}`);
+    console.log(`[Git] This may take a while for large repos with submodules...`);
 
     // Clone with submodules
     await git.clone(authUrl, repoPath, [
       '--recurse-submodules',
       '--shallow-submodules',
+      '--progress',
     ]);
+    console.log(`[Git] Clone complete`);
 
     // Initialize submodules if any were missed
-    const repoGit = simpleGit(repoPath);
+    console.log(`[Git] Updating submodules...`);
+    const repoGit = simpleGit(repoPath, { progress: this.logProgress.bind(this) });
     await repoGit.submoduleUpdate(['--init', '--recursive']);
+    console.log(`[Git] Submodules updated`);
 
     // Checkout release/preview branch
     console.log(`[Git] Checking out release/preview branch...`);
@@ -49,6 +54,15 @@ export class GitManager implements GitOperations {
 
     console.log(`[Git] Repository cloned with submodules on release/preview branch`);
     return repoPath;
+  }
+
+  private logProgress(event: { method: string; stage: string; progress: number }): void {
+    if (event.progress) {
+      process.stdout.write(`\r[Git] ${event.method} ${event.stage}: ${event.progress}%   `);
+      if (event.progress === 100) {
+        console.log('');
+      }
+    }
   }
 
   async createBranch(repoPath: string, branchName: string): Promise<void> {

@@ -7,8 +7,11 @@ import {
   User,
   PartialUser,
   TextChannel,
+  ForumChannel,
+  ThreadChannel,
   Partials,
   Collection,
+  ChannelType,
 } from 'discord.js';
 import { Storage } from '../storage';
 
@@ -157,17 +160,134 @@ export class DiscordBot {
 
   async scanChannelForApprovedMessages(): Promise<CodeRequest[]> {
     console.log('[Discord] Scanning channel for approved messages...');
+    console.log(`[Discord] Channel ID: ${this.channelId}`);
 
-    const channel = await this.client.channels.fetch(this.channelId);
-    if (!channel || !(channel instanceof TextChannel)) {
-      console.error('[Discord] Could not find or access channel');
+    try {
+      const channel = await this.client.channels.fetch(this.channelId);
+
+      if (!channel) {
+        console.error('[Discord] Channel not found. Check DISCORD_CHANNEL_ID in .env');
+        return [];
+      }
+
+      console.log(`[Discord] Channel type: ${channel.type}`);
+
+      // Handle Forum Channel (type 15)
+      if (channel.type === ChannelType.GuildForum) {
+        return await this.scanForumChannel(channel as ForumChannel);
+      }
+
+      // Handle Text Channel (type 0)
+      if (channel instanceof TextChannel) {
+        return await this.scanTextChannel(channel);
+      }
+
+      console.error('[Discord] Unsupported channel type:', channel.type);
+      return [];
+    } catch (error) {
+      console.error('[Discord] Error scanning channel:', error);
       return [];
     }
+  }
 
+  private async scanForumChannel(forum: ForumChannel): Promise<CodeRequest[]> {
+    console.log('[Discord] Scanning forum channel for approved threads...');
+    const approvedRequests: CodeRequest[] = [];
+
+    // Fetch active threads
+    const activeThreads = await forum.threads.fetchActive();
+    console.log(`[Discord] Found ${activeThreads.threads.size} active threads`);
+
+    // Fetch archived threads
+    const archivedThreads = await forum.threads.fetchArchived({ limit: 100 });
+    console.log(`[Discord] Found ${archivedThreads.threads.size} archived threads`);
+
+    // Combine all threads
+    const allThreads = [...activeThreads.threads.values(), ...archivedThreads.threads.values()];
+
+    for (const thread of allThreads) {
+      // Skip if already processed
+      if (this.storage.isProcessed(thread.id) || this.sessionProcessed.has(thread.id)) {
+        continue;
+      }
+
+      try {
+        // Get the starter message (first message in thread)
+        const starterMessage = await thread.fetchStarterMessage();
+        if (!starterMessage) {
+          continue;
+        }
+
+        // Check for approval emoji in reactions
+        const reactions = starterMessage.reactions.cache;
+        for (const reaction of reactions.values()) {
+          if (this.isApprovalEmoji(reaction.emoji)) {
+            console.log(`[Discord] Found approved thread: ${thread.name} (${thread.id})`);
+
+            // Get who approved it
+            let approvedBy = 'unknown';
+            try {
+              const users = await reaction.users.fetch();
+              const approver = users.first();
+              if (approver) {
+                approvedBy = approver.username;
+              }
+            } catch (error) {
+              console.error('[Discord] Error fetching reaction users:', error);
+            }
+
+            this.sessionProcessed.add(thread.id);
+            const request = await this.buildCodeRequestFromThread(thread, starterMessage, approvedBy);
+            approvedRequests.push(request);
+            break;
+          }
+        }
+      } catch (error) {
+        console.error(`[Discord] Error processing thread ${thread.id}:`, error);
+      }
+    }
+
+    // Sort by timestamp (oldest first)
+    approvedRequests.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+    console.log(`[Discord] Forum scan complete. Found ${approvedRequests.length} approved requests.`);
+    return approvedRequests;
+  }
+
+  private async buildCodeRequestFromThread(
+    thread: ThreadChannel,
+    starterMessage: Message,
+    approvedBy: string
+  ): Promise<CodeRequest> {
+    // Collect all messages in the thread as context
+    let threadMessages: string[] = [];
+    try {
+      const messages = await thread.messages.fetch({ limit: 100 });
+      threadMessages = messages
+        .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
+        .map((m) => `${m.author.username}: ${m.content}`)
+        .filter((content) => content.trim());
+    } catch (error) {
+      console.error('[Discord] Error fetching thread messages:', error);
+    }
+
+    return {
+      id: thread.id,
+      messageId: starterMessage.id,
+      channelId: thread.id,
+      content: `**${thread.name}**\n\n${starterMessage.content}`,
+      author: starterMessage.author?.username || 'unknown',
+      approvedBy,
+      timestamp: new Date(thread.createdTimestamp || Date.now()),
+      threadMessages,
+    };
+  }
+
+  private async scanTextChannel(channel: TextChannel): Promise<CodeRequest[]> {
+    console.log('[Discord] Scanning text channel for approved messages...');
     const approvedRequests: CodeRequest[] = [];
     let lastMessageId: string | undefined;
     let totalScanned = 0;
-    const maxMessages = 500; // Limit to prevent excessive API calls
+    const maxMessages = 500;
 
     while (totalScanned < maxMessages) {
       const options: { limit: number; before?: string } = { limit: 100 };
@@ -181,19 +301,15 @@ export class DiscordBot {
       }
 
       for (const message of messages.values()) {
-        // Skip if already processed
         if (this.storage.isProcessed(message.id) || this.sessionProcessed.has(message.id)) {
           continue;
         }
 
-        // Check for approval emoji in reactions
         const reactions = message.reactions.cache;
         for (const reaction of reactions.values()) {
           if (this.isApprovalEmoji(reaction.emoji)) {
-            // Found an approved message
             console.log(`[Discord] Found approved message: ${message.id}`);
 
-            // Get who approved it
             let approvedBy = 'unknown';
             try {
               const users = await reaction.users.fetch();
@@ -219,10 +335,8 @@ export class DiscordBot {
       console.log(`[Discord] Scanned ${totalScanned} messages...`);
     }
 
-    // Sort by timestamp (oldest first)
     approvedRequests.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
-
-    console.log(`[Discord] Scan complete. Found ${approvedRequests.length} approved requests to process.`);
+    console.log(`[Discord] Text channel scan complete. Found ${approvedRequests.length} approved requests.`);
     return approvedRequests;
   }
 
