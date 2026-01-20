@@ -199,16 +199,16 @@ class AutoCode {
         });
       }
 
-      // Notify Discord of failure
-      try {
-        await this.discord.replyToMessage(
-          request.channelId,
-          request.messageId,
-          `❌ AutoCode encountered an error while processing this request:\n\`\`\`\n${error instanceof Error ? error.message : 'Unknown error'}\n\`\`\``
-        );
-      } catch (discordError) {
-        console.error('[AutoCode] Failed to notify Discord of error:', discordError);
-      }
+      // Discord notification disabled for now
+      // try {
+      //   await this.discord.replyToMessage(
+      //     request.channelId,
+      //     request.messageId,
+      //     `❌ AutoCode encountered an error while processing this request:\n\`\`\`\n${error instanceof Error ? error.message : 'Unknown error'}\n\`\`\``
+      //   );
+      // } catch (discordError) {
+      //   console.error('[AutoCode] Failed to notify Discord of error:', discordError);
+      // }
     }
   }
 
@@ -342,11 +342,12 @@ class AutoCode {
 
       if (!hasChanges) {
         console.log('[AutoCode] No changes were made by Claude');
-        await this.discord.replyToMessage(
-          request.channelId,
-          request.messageId,
-          `⚠️ AutoCode processed the request but no code changes were made.`
-        );
+        // Discord notification disabled for now
+        // await this.discord.replyToMessage(
+        //   request.channelId,
+        //   request.messageId,
+        //   `⚠️ AutoCode processed the request but no code changes were made.`
+        // );
         await this.storage.updateWorkspaceStatus(request.id, 'completed');
         await this.storage.markProcessed(request.id);
         return;
@@ -394,23 +395,24 @@ ${request.content}
       await this.storage.updateWorkspaceStatus(request.id, 'mr_created', { mrUrl: mrResult.webUrl });
     }
 
-    // Step 7: Mark as completed and notify Discord
+    // Step 7: Mark as completed
     await this.storage.markProcessed(request.id);
     await this.storage.updateWorkspaceStatus(request.id, 'completed');
 
     const finalWorkspaceInfo = this.storage.getWorkspace(request.id);
     const mrUrl = finalWorkspaceInfo?.mrUrl;
 
-    console.log('\n[Step 7] Notifying Discord...');
-    await this.discord.replyToMessage(
-      request.channelId,
-      request.messageId,
-      `✅ AutoCode has completed the implementation!
-
-🔗 **Merge Request:** ${mrUrl}
-
-Please review the changes and merge when ready.`
-    );
+    // Discord notification disabled for now
+    // console.log('\n[Step 7] Notifying Discord...');
+    // await this.discord.replyToMessage(
+    //   request.channelId,
+    //   request.messageId,
+    //   `✅ AutoCode has completed the implementation!
+    //
+    // 🔗 **Merge Request:** ${mrUrl}
+    //
+    // Please review the changes and merge when ready.`
+    // );
 
     console.log('\n' + '='.repeat(50));
     console.log(`[AutoCode] Request ${request.id} completed successfully!`);
