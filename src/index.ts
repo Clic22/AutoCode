@@ -270,12 +270,9 @@ Please review the changes and merge when ready.`
       .replace(/\s+/g, '-')                    // Spaces to dashes
       .replace(/-+/g, '-')                     // Multiple dashes to single
       .replace(/^-|-$/g, '')                   // Remove leading/trailing dashes
-      .substring(0, 40);                       // Limit length
+      .substring(0, 50);                       // Limit length
 
-    // Add timestamp to ensure uniqueness
-    const timestamp = Date.now().toString(36); // Short base36 timestamp
-
-    return `${prefix}/${sanitized}-${timestamp}`;
+    return `${prefix}/${sanitized}`;
   }
 
   async stop(): Promise<void> {
