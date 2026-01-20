@@ -391,21 +391,24 @@ Now review the implementation:`;
   }
 
   private async execute(repoPath: string, prompt: string): Promise<ClaudeResult> {
-    // Write prompt to a temporary file to avoid shell escaping issues
+    // Write prompt to a temporary file
     const promptFile = path.join(repoPath, '.autocode-prompt.txt');
     await fs.writeFile(promptFile, prompt, 'utf-8');
 
+    console.log(`[Claude] Starting CLI in: ${repoPath}`);
+    console.log(`[Claude] Prompt saved to: ${promptFile}`);
+    console.log(`[Claude] Prompt length: ${prompt.length} characters`);
+
     return new Promise((resolve) => {
-      // Use stdin to pass the prompt - more reliable than command line args
-      const args = [
-        '--print',
-        '--dangerously-skip-permissions',
-      ];
+      // Use pipe to pass prompt from file to Claude CLI
+      // This is more reliable than stdin.write() or command line args
+      const command = process.platform === 'win32'
+        ? `type "${promptFile}" | ${this.cliPath} --print --dangerously-skip-permissions`
+        : `cat "${promptFile}" | ${this.cliPath} --print --dangerously-skip-permissions`;
 
-      console.log(`[Claude] Starting CLI in: ${repoPath}`);
-      console.log(`[Claude] Prompt length: ${prompt.length} characters`);
+      console.log(`[Claude] Executing command...`);
 
-      const proc = spawn(this.cliPath, args, {
+      const proc = spawn(command, [], {
         cwd: repoPath,
         shell: true,
         env: {
@@ -417,10 +420,6 @@ Now review the implementation:`;
       let stdout = '';
       let stderr = '';
 
-      // Send prompt via stdin
-      proc.stdin.write(prompt);
-      proc.stdin.end();
-
       proc.stdout.on('data', (data) => {
         const text = data.toString();
         stdout += text;
@@ -430,9 +429,9 @@ Now review the implementation:`;
       proc.stderr.on('data', (data) => {
         const text = data.toString();
         stderr += text;
-        // Only print actual errors, not progress messages
-        if (!text.includes('�') && !text.includes('─')) {
-          process.stderr.write(`[Claude Error] ${text}`);
+        // Filter out UI noise
+        if (text.trim() && !text.includes('─') && !text.includes('│') && !text.includes('╭') && !text.includes('╰')) {
+          process.stderr.write(`[Claude] ${text}`);
         }
       });
 
