@@ -386,17 +386,15 @@ Now review the implementation:`;
     console.log(`[Claude] Prompt length: ${prompt.length} characters`);
 
     return new Promise((resolve) => {
-      // Use pipe to pass prompt from file to Claude CLI
-      // This is more reliable than stdin.write() or command line args
-      const command = process.platform === 'win32'
-        ? `type "${promptFile}" | ${this.cliPath} --print --dangerously-skip-permissions`
-        : `cat "${promptFile}" | ${this.cliPath} --print --dangerously-skip-permissions`;
+      // Read prompt from file and pass via stdin
+      const args = ['--print', '--dangerously-skip-permissions'];
 
-      console.log(`[Claude] Executing command...`);
+      console.log(`[Claude] Executing: ${this.cliPath} ${args.join(' ')}`);
 
-      const proc = spawn(command, [], {
+      const proc = spawn(this.cliPath, args, {
         cwd: repoPath,
-        shell: true,
+        shell: false,  // Don't use shell to avoid escaping issues
+        stdio: ['pipe', 'pipe', 'pipe'],
         env: {
           ...process.env,
           PWD: repoPath,
@@ -406,13 +404,17 @@ Now review the implementation:`;
       let stdout = '';
       let stderr = '';
 
-      proc.stdout.on('data', (data) => {
+      // Read file and pipe to stdin
+      const fileStream = require('fs').createReadStream(promptFile);
+      fileStream.pipe(proc.stdin);
+
+      proc.stdout.on('data', (data: Buffer) => {
         const text = data.toString();
         stdout += text;
         process.stdout.write(text);
       });
 
-      proc.stderr.on('data', (data) => {
+      proc.stderr.on('data', (data: Buffer) => {
         const text = data.toString();
         stderr += text;
         // Filter out UI noise
