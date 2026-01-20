@@ -8,6 +8,14 @@ export interface ClaudeResult {
   error?: string;
 }
 
+export interface ReviewResult {
+  approved: boolean;
+  feedback: string;
+  issues: string[];
+}
+
+const MAX_IMPLEMENTATION_ATTEMPTS = 3;
+
 export class ClaudeOrchestrator {
   private cliPath: string;
 
@@ -20,29 +28,51 @@ export class ClaudeOrchestrator {
    */
   async analyzeRequest(repoPath: string, discordContent: string, threadMessages?: string[]): Promise<ClaudeResult> {
     console.log(`[Claude Phase 1] Analyzing request and generating development prompt...`);
-
     const analysisPrompt = this.buildAnalysisPrompt(discordContent, threadMessages);
     return this.execute(repoPath, analysisPrompt);
   }
 
   /**
-   * Phase 2: Implement the feature based on the refined prompt from Phase 1
+   * Phase 2: Implement the feature based on the refined prompt
    */
-  async implementFeature(repoPath: string, developmentPrompt: string): Promise<ClaudeResult> {
-    console.log(`[Claude Phase 2] Implementing feature based on analyzed requirements...`);
-
-    const implementationPrompt = this.buildImplementationPrompt(developmentPrompt);
+  async implementFeature(repoPath: string, developmentPrompt: string, previousFeedback?: string): Promise<ClaudeResult> {
+    console.log(`[Claude Phase 2] Implementing feature...`);
+    const implementationPrompt = this.buildImplementationPrompt(developmentPrompt, previousFeedback);
     return this.execute(repoPath, implementationPrompt);
   }
 
   /**
-   * Full two-phase execution
+   * Phase 3: QA Review - Check code quality, potential issues, and alignment with requirements
    */
-  async executeTask(repoPath: string, discordContent: string, threadMessages?: string[], workspacePath?: string): Promise<ClaudeResult> {
+  async reviewImplementation(repoPath: string, developmentPrompt: string): Promise<ReviewResult> {
+    console.log(`[Claude Phase 3] Reviewing implementation...`);
+    const reviewPrompt = this.buildReviewPrompt(developmentPrompt);
+    const result = await this.execute(repoPath, reviewPrompt);
+
+    if (!result.success) {
+      return {
+        approved: false,
+        feedback: 'Review failed to execute',
+        issues: [result.error || 'Unknown error'],
+      };
+    }
+
+    return this.parseReviewResult(result.output);
+  }
+
+  /**
+   * Full three-phase execution with review loop
+   */
+  async executeTask(
+    repoPath: string,
+    discordContent: string,
+    threadMessages?: string[],
+    workspacePath?: string
+  ): Promise<ClaudeResult> {
     // Phase 1: Analysis
-    console.log('\n' + '='.repeat(40));
+    console.log('\n' + '='.repeat(50));
     console.log('[Claude] PHASE 1: Analyzing request...');
-    console.log('='.repeat(40));
+    console.log('='.repeat(50));
 
     const analysisResult = await this.analyzeRequest(repoPath, discordContent, threadMessages);
 
@@ -63,14 +93,115 @@ export class ClaudeOrchestrator {
     console.log(developmentPrompt.substring(0, 500) + (developmentPrompt.length > 500 ? '...' : ''));
     console.log('-'.repeat(40));
 
-    // Phase 2: Implementation
-    console.log('\n' + '='.repeat(40));
-    console.log('[Claude] PHASE 2: Implementing feature...');
-    console.log('='.repeat(40));
+    // Implementation and Review Loop
+    let attempt = 1;
+    let previousFeedback: string | undefined;
+    let implementationResult: ClaudeResult = { success: false, output: '', error: 'No implementation attempted' };
 
-    const implementationResult = await this.implementFeature(repoPath, developmentPrompt);
+    while (attempt <= MAX_IMPLEMENTATION_ATTEMPTS) {
+      // Phase 2: Implementation
+      console.log('\n' + '='.repeat(50));
+      console.log(`[Claude] PHASE 2: Implementing feature (Attempt ${attempt}/${MAX_IMPLEMENTATION_ATTEMPTS})...`);
+      console.log('='.repeat(50));
 
+      implementationResult = await this.implementFeature(repoPath, developmentPrompt, previousFeedback);
+
+      if (!implementationResult.success) {
+        console.error('[Claude] Phase 2 failed');
+        return implementationResult;
+      }
+
+      // Phase 3: QA Review
+      console.log('\n' + '='.repeat(50));
+      console.log(`[Claude] PHASE 3: QA Review (Attempt ${attempt}/${MAX_IMPLEMENTATION_ATTEMPTS})...`);
+      console.log('='.repeat(50));
+
+      const reviewResult = await this.reviewImplementation(repoPath, developmentPrompt);
+
+      // Save review result
+      const reviewFilePath = path.join(workspacePath || path.dirname(repoPath), `review-attempt-${attempt}.md`);
+      await this.saveReviewToFile(reviewFilePath, reviewResult, attempt);
+
+      if (reviewResult.approved) {
+        console.log('\n[Claude] ✅ QA Review PASSED - Implementation approved!');
+        return implementationResult;
+      }
+
+      console.log('\n[Claude] ❌ QA Review FAILED - Issues found:');
+      reviewResult.issues.forEach((issue, i) => {
+        console.log(`  ${i + 1}. ${issue}`);
+      });
+
+      if (attempt < MAX_IMPLEMENTATION_ATTEMPTS) {
+        console.log(`\n[Claude] Preparing to re-implement with feedback...`);
+        previousFeedback = this.buildFeedbackForRetry(reviewResult);
+      }
+
+      attempt++;
+    }
+
+    console.log(`\n[Claude] ⚠️ Max attempts (${MAX_IMPLEMENTATION_ATTEMPTS}) reached. Proceeding with last implementation.`);
     return implementationResult;
+  }
+
+  private parseReviewResult(output: string): ReviewResult {
+    const outputLower = output.toLowerCase();
+
+    // Look for explicit approval/rejection markers
+    const hasApproved = outputLower.includes('**approved**') ||
+                        outputLower.includes('status: approved') ||
+                        outputLower.includes('review: approved') ||
+                        (outputLower.includes('approved') && !outputLower.includes('not approved'));
+
+    const hasRejected = outputLower.includes('**rejected**') ||
+                        outputLower.includes('status: rejected') ||
+                        outputLower.includes('review: rejected') ||
+                        outputLower.includes('not approved');
+
+    // Extract issues - look for numbered lists or bullet points after "issues" or "problems"
+    const issues: string[] = [];
+    const issuePatterns = [
+      /(?:issues?|problems?|concerns?|bugs?|errors?)[:\s]*\n((?:[-*\d.]+\s*.+\n?)+)/gi,
+      /(?:must fix|needs? fix|should fix|critical|high priority)[:\s]*(.+)/gi,
+    ];
+
+    for (const pattern of issuePatterns) {
+      const matches = output.matchAll(pattern);
+      for (const match of matches) {
+        const issueBlock = match[1];
+        const lines = issueBlock.split('\n').filter(l => l.trim());
+        issues.push(...lines.map(l => l.replace(/^[-*\d.]+\s*/, '').trim()).filter(l => l));
+      }
+    }
+
+    // If we found issues but no clear rejection, consider it rejected
+    const approved = hasApproved && !hasRejected && issues.length === 0;
+
+    return {
+      approved,
+      feedback: output,
+      issues: issues.length > 0 ? issues : (approved ? [] : ['Review did not explicitly approve the implementation']),
+    };
+  }
+
+  private buildFeedbackForRetry(reviewResult: ReviewResult): string {
+    return `
+## Previous Implementation Review - FAILED
+
+The previous implementation was reviewed and the following issues were found:
+
+${reviewResult.issues.map((issue, i) => `${i + 1}. ${issue}`).join('\n')}
+
+## Instructions for This Attempt
+
+Please address ALL the issues listed above. Focus on:
+- Fixing any potential crashes or null pointer issues
+- Addressing performance concerns
+- Ensuring the implementation matches the requirements
+- Following coding best practices
+
+Do NOT repeat the same mistakes.
+`;
   }
 
   private async savePromptToFile(
@@ -99,6 +230,24 @@ ${developmentPrompt}
 cd repo
 claude --print --dangerously-skip-permissions "$(cat ../development-prompt.md)"
 \`\`\`
+`;
+
+    await fs.writeFile(filePath, content, 'utf-8');
+  }
+
+  private async saveReviewToFile(filePath: string, reviewResult: ReviewResult, attempt: number): Promise<void> {
+    const content = `# AutoCode QA Review - Attempt ${attempt}
+
+Generated: ${new Date().toISOString()}
+
+## Status: ${reviewResult.approved ? '✅ APPROVED' : '❌ REJECTED'}
+
+## Issues Found
+${reviewResult.issues.length > 0 ? reviewResult.issues.map((issue, i) => `${i + 1}. ${issue}`).join('\n') : 'No issues found.'}
+
+## Full Review Output
+
+${reviewResult.feedback}
 `;
 
     await fs.writeFile(filePath, content, 'utf-8');
@@ -155,12 +304,20 @@ Now analyze and generate the development prompt:`;
     return prompt;
   }
 
-  private buildImplementationPrompt(developmentPrompt: string): string {
-    return `You are a senior developer implementing a feature.
+  private buildImplementationPrompt(developmentPrompt: string, previousFeedback?: string): string {
+    let prompt = `You are a senior developer implementing a feature.
 
 ## Development Requirements
 ${developmentPrompt}
+`;
 
+    if (previousFeedback) {
+      prompt += `
+${previousFeedback}
+`;
+    }
+
+    prompt += `
 ## Implementation Instructions
 1. Read and understand the requirements above carefully
 2. Explore the codebase to understand the existing architecture
@@ -176,6 +333,61 @@ ${developmentPrompt}
 - Test your changes if possible
 
 Please implement this feature now.`;
+
+    return prompt;
+  }
+
+  private buildReviewPrompt(developmentPrompt: string): string {
+    return `You are a senior QA engineer and code reviewer. Your job is to review the implementation that was just made.
+
+## Original Requirements
+${developmentPrompt}
+
+## Your Task
+Review ALL the changes that were made in this repository. Use git diff or explore the modified files to understand what was implemented.
+
+## Review Criteria
+Check for the following:
+
+### 1. Crashes & Stability
+- Null pointer / undefined access risks
+- Unhandled exceptions
+- Resource leaks (memory, file handles, connections)
+- Race conditions or threading issues
+
+### 2. Performance
+- Inefficient algorithms (O(n²) where O(n) is possible)
+- Unnecessary loops or redundant operations
+- Memory inefficiencies
+- Blocking operations in async contexts
+
+### 3. Requirements Alignment
+- Does the implementation match ALL the requirements?
+- Are there missing features?
+- Are there extra features that weren't requested?
+
+### 4. Code Quality
+- Does it follow the existing code style?
+- Are there obvious bugs or logic errors?
+- Is the code maintainable?
+
+## Output Format
+You MUST output your review in this exact format:
+
+### Review Status
+**APPROVED** or **REJECTED**
+
+### Issues Found
+[If REJECTED, list ALL issues that must be fixed, numbered]
+
+### Recommendations
+[Optional improvements that are not blocking]
+
+### Summary
+[Brief summary of your review]
+
+---
+Now review the implementation:`;
   }
 
   private execute(repoPath: string, prompt: string): Promise<ClaudeResult> {
