@@ -222,16 +222,24 @@ class AutoCode {
     branchName: string,
     repoPath: string
   ): Promise<void> {
-    const status = workspaceInfo.status;
+    const initialStatus = workspaceInfo.status;
     const log = (msg: string) => console.log(`[${branchName}] ${msg}`);
 
-    log(`Resuming from status: ${status}`);
+    log(`Resuming from status: ${initialStatus}`);
 
     // Determine where to resume from
     let developmentPrompt = workspaceInfo.developmentPrompt;
 
-    // Phase 1: Analysis (if not done yet)
-    if (status === 'created' || status === 'analysis') {
+    // Determine which phases need to run based on initial status
+    const needsAnalysis = ['created', 'analysis'].includes(initialStatus);
+    const needsImplementation = needsAnalysis || ['analysis_done', 'implementation', 'review_failed'].includes(initialStatus);
+    const needsReview = needsImplementation || ['implementation_done', 'review'].includes(initialStatus);
+    const needsCommit = needsReview; // After review, we commit
+    const needsPush = ['committed'].includes(initialStatus);
+    const needsMR = ['pushed'].includes(initialStatus);
+
+    // Phase 1: Analysis
+    if (needsAnalysis) {
       await this.storage.updateWorkspaceStatus(request.id, 'analysis');
 
       log('[Phase 1] Analyzing request and generating development prompt...');
@@ -257,7 +265,7 @@ class AutoCode {
     }
 
     // Phase 2 & 3: Implementation with review loop
-    if (['analysis_done', 'implementation', 'implementation_done', 'review', 'review_failed'].includes(status)) {
+    if (needsImplementation) {
       if (!developmentPrompt) {
         // Try to load from file
         const promptFilePath = path.join(workspace.path, 'development-prompt.md');
@@ -276,21 +284,22 @@ class AutoCode {
       let previousFeedback: string | undefined;
 
       // If we're resuming from a failed review, prepare feedback
-      if (status === 'review_failed') {
+      if (initialStatus === 'review_failed') {
         const reviewFilePath = path.join(workspace.path, `review-attempt-${attempt}.md`);
         try {
           const reviewContent = await fs.readFile(reviewFilePath, 'utf-8');
           previousFeedback = this.extractFeedbackFromReview(reviewContent);
           attempt++; // Move to next attempt
-          await this.storage.updateWorkspaceStatus(request.id, 'implementation', { attempt });
         } catch {
           // No previous review found, start fresh
         }
       }
 
       while (attempt <= MAX_ATTEMPTS) {
-        // Phase 2: Implementation
-        if (['analysis_done', 'implementation', 'review_failed'].includes(workspaceInfo.status) || attempt > 1) {
+        // Phase 2: Implementation (skip if resuming from implementation_done or review)
+        const skipImplementation = !needsAnalysis && ['implementation_done', 'review'].includes(initialStatus) && attempt === 1;
+
+        if (!skipImplementation) {
           await this.storage.updateWorkspaceStatus(request.id, 'implementation', { attempt });
 
           log(`[Phase 2] Implementing feature (Attempt ${attempt}/${MAX_ATTEMPTS})...`);
@@ -334,7 +343,6 @@ class AutoCode {
           log('Preparing retry with feedback...');
           previousFeedback = this.buildFeedbackForRetry(reviewResult);
           attempt++;
-          await this.storage.updateWorkspaceStatus(request.id, 'implementation', { attempt });
         } else {
           log('⚠️ Max attempts reached. Proceeding with last implementation.');
           break;
@@ -343,43 +351,44 @@ class AutoCode {
     }
 
     // Step 4: Commit changes
-    if (['implementation_done', 'review', 'review_failed'].includes(status) || workspaceInfo.status === 'review') {
+    if (needsCommit || needsPush || needsMR) {
       log('[Step 4] Checking for changes to commit...');
       const hasChanges = await this.gitManager.hasChanges(repoPath);
 
       if (!hasChanges) {
         log('No changes were made by Claude');
-        // Discord notification disabled for now
-        // await this.discord.replyToMessage(
-        //   request.channelId,
-        //   request.messageId,
-        //   `⚠️ AutoCode processed the request but no code changes were made.`
-        // );
         await this.storage.updateWorkspaceStatus(request.id, 'completed');
         await this.storage.markProcessed(request.id);
         return;
       }
 
-      const commitMessage = `AutoCode: Implement feature from Discord request
+      // Only commit if not already committed
+      if (!needsPush && !needsMR) {
+        const commitMessage = `AutoCode: Implement feature from Discord request
 
 Request: ${request.content.substring(0, 100)}...
 Requested by: ${request.author}
 Approved by: ${request.approvedBy}
 Request ID: ${request.id}`;
 
-      await this.gitManager.commitAll(repoPath, commitMessage);
-      await this.storage.updateWorkspaceStatus(request.id, 'committed');
+        await this.gitManager.commitAll(repoPath, commitMessage);
+        await this.storage.updateWorkspaceStatus(request.id, 'committed');
+        log('[Step 4] Changes committed.');
+      }
     }
 
     // Step 5: Push to remote
-    if (workspaceInfo.status === 'committed' || status === 'committed') {
-      log('[Step 5] Pushing to remote...');
-      await this.gitManager.push(repoPath, branchName);
-      await this.storage.updateWorkspaceStatus(request.id, 'pushed');
+    if (needsCommit || needsPush || needsMR) {
+      // Only push if not already pushed
+      if (!needsMR) {
+        log('[Step 5] Pushing to remote...');
+        await this.gitManager.push(repoPath, branchName);
+        await this.storage.updateWorkspaceStatus(request.id, 'pushed');
+      }
     }
 
     // Step 6: Create Merge Request
-    if (workspaceInfo.status === 'pushed' || status === 'pushed') {
+    if (needsCommit || needsPush || needsMR) {
       log('[Step 6] Creating Merge Request...');
       const targetBranch = 'release/preview';
       const mrResult = await this.gitlabClient.createMergeRequest({
