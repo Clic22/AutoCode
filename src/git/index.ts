@@ -42,12 +42,12 @@ export class GitManager implements GitOperations {
     const repoGit = simpleGit(repoPath);
     await repoGit.submoduleUpdate(['--init', '--recursive']);
 
-    // Checkout release/stable branch
-    console.log(`[Git] Checking out release/stable branch...`);
-    await repoGit.checkout('release/stable');
+    // Checkout release/preview branch
+    console.log(`[Git] Checking out release/preview branch...`);
+    await repoGit.checkout('release/preview');
     await repoGit.submoduleUpdate(['--init', '--recursive']);
 
-    console.log(`[Git] Repository cloned with submodules on stable branch`);
+    console.log(`[Git] Repository cloned with submodules on release/preview branch`);
     return repoPath;
   }
 

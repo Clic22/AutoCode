@@ -166,7 +166,7 @@ Request ID: ${request.id}`;
 
       // Step 8: Create Merge Request
       console.log('\n[Step 8] Creating Merge Request...');
-      const targetBranch = 'release/stable';
+      const targetBranch = 'release/preview';
       const mrResult = await this.gitlabClient.createMergeRequest({
         sourceBranch: branchName,
         targetBranch: targetBranch,
