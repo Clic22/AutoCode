@@ -32,23 +32,34 @@ export class GitLabClient {
   async createMergeRequest(options: MergeRequestOptions): Promise<MergeRequestResult> {
     console.log(`[GitLab] Creating merge request: ${options.title}`);
 
-    const response = await this.client.post(`/projects/${this.projectId}/merge_requests`, {
-      source_branch: options.sourceBranch,
-      target_branch: options.targetBranch,
-      title: options.title,
-      description: options.description,
-      remove_source_branch: true,
-    });
+    try {
+      const response = await this.client.post(`/projects/${this.projectId}/merge_requests`, {
+        source_branch: options.sourceBranch,
+        target_branch: options.targetBranch,
+        title: options.title,
+        description: options.description,
+        remove_source_branch: true,
+      });
 
-    const result: MergeRequestResult = {
-      id: response.data.id,
-      iid: response.data.iid,
-      webUrl: response.data.web_url,
-      title: response.data.title,
-    };
+      const result: MergeRequestResult = {
+        id: response.data.id,
+        iid: response.data.iid,
+        webUrl: response.data.web_url,
+        title: response.data.title,
+      };
 
-    console.log(`[GitLab] Merge request created: ${result.webUrl}`);
-    return result;
+      console.log(`[GitLab] Merge request created: ${result.webUrl}`);
+      return result;
+    } catch (error: any) {
+      console.error(`[GitLab] Failed to create merge request:`);
+      if (error.response) {
+        console.error(`[GitLab]   Status: ${error.response.status}`);
+        console.error(`[GitLab]   Data: ${JSON.stringify(error.response.data)}`);
+      } else {
+        console.error(`[GitLab]   Error: ${error.message}`);
+      }
+      throw error;
+    }
   }
 
   async getDefaultBranch(): Promise<string> {

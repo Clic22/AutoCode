@@ -384,12 +384,9 @@ class AutoCode {
 
       // Only commit if not already committed
       if (!needsPush && !needsMR) {
-        const commitMessage = `AutoCode: Implement feature from Discord request
-
-Request: ${request.content.substring(0, 100)}...
-Requested by: ${request.author}
-Approved by: ${request.approvedBy}
-Request ID: ${request.id}`;
+        // Extract a meaningful title from the development prompt
+        const featureTitle = this.extractFeatureTitle(developmentPrompt || '', branchName);
+        const commitMessage = featureTitle;
 
         await this.gitManager.commitAll(repoPath, commitMessage);
         await this.storage.updateWorkspaceStatus(request.id, 'committed');
@@ -412,21 +409,18 @@ Request ID: ${request.id}`;
       log('[Step 6] Creating Merge Request...');
       const targetBranch = 'release/preview';
 
-      // Extract test checklist from development prompt
+      // Extract meaningful title and test checklist from development prompt
+      const featureTitle = this.extractFeatureTitle(developmentPrompt || '', branchName);
       const testChecklist = this.extractTestChecklist(developmentPrompt || '');
+      const featureSummary = this.extractFeatureSummary(developmentPrompt || '');
 
       const mrResult = await this.gitlabClient.createMergeRequest({
         sourceBranch: branchName,
         targetBranch: targetBranch,
-        title: `AutoCode: ${request.content.substring(0, 80)}`,
-        description: `## Feature Request from Discord
+        title: featureTitle,
+        description: `## Summary
 
-**Original Request:**
-${request.content}
-
-**Requested by:** ${request.author}
-**Approved by:** ${request.approvedBy}
-**Request ID:** ${request.id}
+${featureSummary}
 
 ---
 
@@ -596,6 +590,52 @@ Do NOT repeat the same mistakes.
 - [ ] Vérifier qu'il n'y a pas de régression
 - [ ] Tester les cas limites
 - [ ] Vérifier la qualité du code`;
+  }
+
+  private extractFeatureTitle(developmentPrompt: string, branchName: string): string {
+    // Try to find "## Development Prompt: <title>" pattern
+    const devPromptMatch = developmentPrompt.match(/##\s*Development Prompt:\s*(.+)/i);
+    if (devPromptMatch) {
+      return devPromptMatch[1].trim();
+    }
+
+    // Try to find "### Feature Summary" and extract first sentence
+    const summaryMatch = developmentPrompt.match(/### Feature Summary\n+([^\n]+)/i);
+    if (summaryMatch) {
+      const summary = summaryMatch[1].trim();
+      // Take first sentence or first 80 chars
+      const firstSentence = summary.split(/[.!?]/)[0];
+      if (firstSentence.length > 80) {
+        return firstSentence.substring(0, 77) + '...';
+      }
+      return firstSentence;
+    }
+
+    // Fallback: use branch name formatted nicely
+    const branchTitle = branchName
+      .replace(/^(feature|fix)\//, '')
+      .replace(/-/g, ' ')
+      .replace(/\b\w/g, c => c.toUpperCase());
+
+    return branchTitle;
+  }
+
+  private extractFeatureSummary(developmentPrompt: string): string {
+    // Try to find "### Feature Summary" section
+    const summaryMatch = developmentPrompt.match(/### Feature Summary\n+([\s\S]*?)(?=\n###|$)/i);
+    if (summaryMatch) {
+      return summaryMatch[1].trim();
+    }
+
+    // Fallback: try to find any summary-like content at the beginning
+    const lines = developmentPrompt.split('\n').filter(l => l.trim() && !l.startsWith('#'));
+    if (lines.length > 0) {
+      // Take first paragraph
+      const firstPara = lines.slice(0, 3).join('\n');
+      return firstPara.length > 500 ? firstPara.substring(0, 497) + '...' : firstPara;
+    }
+
+    return 'See development prompt for details.';
   }
 
   private async directoryExists(dirPath: string): Promise<boolean> {
