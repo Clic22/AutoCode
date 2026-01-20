@@ -75,6 +75,22 @@ class AutoCode {
       for (const ws of incompleteWorkspaces) {
         console.log(`  - ${ws.messageId}: status=${ws.status}, branch=${ws.branchName}`);
       }
+
+      // Resume incomplete workspaces by creating CodeRequest objects
+      for (const ws of incompleteWorkspaces) {
+        const resumeRequest: CodeRequest = {
+          id: ws.messageId,
+          content: ws.developmentPrompt || 'Resuming from saved workspace',
+          author: 'Unknown (resumed)',
+          approvedBy: 'Unknown (resumed)',
+          channelId: '',
+          messageId: ws.messageId,
+          threadMessages: [],
+          timestamp: new Date(ws.createdAt),
+        };
+        this.requestQueue.push(resumeRequest);
+        console.log(`[AutoCode] Queued workspace ${ws.messageId} for resume`);
+      }
     }
 
     // Scan channel for existing approved messages
@@ -86,7 +102,11 @@ class AutoCode {
       for (const request of pendingRequests) {
         this.requestQueue.push(request);
       }
-      // Start processing queue (up to MAX_CONCURRENT_REQUESTS in parallel)
+    }
+
+    // Start processing any queued requests (incomplete workspaces + new requests)
+    if (this.requestQueue.length > 0) {
+      console.log(`[AutoCode] Processing ${this.requestQueue.length} request(s) in parallel (max ${MAX_CONCURRENT_REQUESTS})...`);
       this.processNextRequests();
     } else {
       console.log('[AutoCode] No pending requests found.');
