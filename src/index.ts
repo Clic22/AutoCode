@@ -98,9 +98,18 @@ class AutoCode {
     const pendingRequests = await this.discord.scanChannelForApprovedMessages();
 
     if (pendingRequests.length > 0) {
-      console.log(`[AutoCode] Found ${pendingRequests.length} pending requests, processing in parallel (max ${MAX_CONCURRENT_REQUESTS})...`);
-      for (const request of pendingRequests) {
-        this.requestQueue.push(request);
+      // Filter out requests that are already queued (from incomplete workspaces)
+      const queuedIds = new Set(this.requestQueue.map(r => r.id));
+      const newRequests = pendingRequests.filter(r => !queuedIds.has(r.id));
+
+      if (newRequests.length > 0) {
+        console.log(`[AutoCode] Found ${newRequests.length} new pending request(s)`);
+        for (const request of newRequests) {
+          this.requestQueue.push(request);
+        }
+      }
+      if (pendingRequests.length !== newRequests.length) {
+        console.log(`[AutoCode] Skipped ${pendingRequests.length - newRequests.length} already queued request(s)`);
       }
     }
 
@@ -370,8 +379,8 @@ class AutoCode {
       }
     }
 
-    // Step 4: Commit changes
-    if (needsCommit || needsPush || needsMR) {
+    // Step 4: Commit changes (only if not already committed/pushed)
+    if (needsCommit && !needsPush && !needsMR) {
       log('[Step 4] Checking for changes to commit...');
       const hasChanges = await this.gitManager.hasChanges(repoPath);
 
@@ -382,26 +391,20 @@ class AutoCode {
         return;
       }
 
-      // Only commit if not already committed
-      if (!needsPush && !needsMR) {
-        // Extract a meaningful title from the development prompt
-        const featureTitle = this.extractFeatureTitle(developmentPrompt || '', branchName);
-        const commitMessage = featureTitle;
+      // Extract a meaningful title from the development prompt
+      const featureTitle = this.extractFeatureTitle(developmentPrompt || '', branchName);
+      const commitMessage = featureTitle;
 
-        await this.gitManager.commitAll(repoPath, commitMessage);
-        await this.storage.updateWorkspaceStatus(request.id, 'committed');
-        log('[Step 4] Changes committed.');
-      }
+      await this.gitManager.commitAll(repoPath, commitMessage);
+      await this.storage.updateWorkspaceStatus(request.id, 'committed');
+      log('[Step 4] Changes committed.');
     }
 
-    // Step 5: Push to remote
-    if (needsCommit || needsPush || needsMR) {
-      // Only push if not already pushed
-      if (!needsMR) {
-        log('[Step 5] Pushing to remote...');
-        await this.gitManager.push(repoPath, branchName);
-        await this.storage.updateWorkspaceStatus(request.id, 'pushed');
-      }
+    // Step 5: Push to remote (only if not already pushed)
+    if ((needsCommit || needsPush) && !needsMR) {
+      log('[Step 5] Pushing to remote...');
+      await this.gitManager.push(repoPath, branchName);
+      await this.storage.updateWorkspaceStatus(request.id, 'pushed');
     }
 
     // Step 6: Create Merge Request
