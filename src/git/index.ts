@@ -93,11 +93,35 @@ export class GitManager implements GitOperations {
   }
 
   /**
+   * Update the base repo to latest version
+   */
+  async updateBaseRepo(): Promise<void> {
+    const git = simpleGit(this.baseRepoPath);
+
+    console.log(`[Git] Fetching latest changes from origin...`);
+    await git.fetch(['origin', '--prune']);
+
+    // Update the base branch reference
+    console.log(`[Git] Updating ${this.baseBranch} reference...`);
+    await git.checkout(this.baseBranch);
+    await git.reset(['--hard', `origin/${this.baseBranch}`]);
+
+    // Update submodules in base repo
+    console.log('[Git] Updating submodules in base repo...');
+    await git.submoduleUpdate(['--init', '--recursive']);
+
+    console.log('[Git] Base repo updated to latest');
+  }
+
+  /**
    * Create a worktree for a specific request - this is very fast!
    */
   async createWorktree(workspace: Workspace, featureBranchName: string): Promise<string> {
     const worktreePath = path.join(workspace.path, 'repo');
     const git = simpleGit(this.baseRepoPath);
+
+    // First, update the base repo to get latest changes
+    await this.updateBaseRepo();
 
     console.log(`[Git] Creating worktree at: ${worktreePath}`);
     console.log(`[Git] Feature branch: ${featureBranchName}`);
