@@ -166,10 +166,10 @@ Request ID: ${request.id}`;
 
       // Step 8: Create Merge Request
       console.log('\n[Step 8] Creating Merge Request...');
-      const defaultBranch = await this.gitlabClient.getDefaultBranch();
+      const targetBranch = 'release/stable';
       const mrResult = await this.gitlabClient.createMergeRequest({
         sourceBranch: branchName,
-        targetBranch: defaultBranch,
+        targetBranch: targetBranch,
         title: `AutoCode: ${request.content.substring(0, 80)}`,
         description: `## Feature Request from Discord
 
