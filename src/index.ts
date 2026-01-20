@@ -130,7 +130,7 @@ class AutoCode {
 
       // Step 2: Create worktree with feature branch (fast - uses base repo)
       console.log('\n[Step 2] Creating worktree from base repository...');
-      const branchName = `autocode/${request.id}-${Date.now()}`;
+      const branchName = this.generateBranchName(request.content);
       const repoPath = await this.gitManager.createWorktree(workspace, branchName);
 
       // Step 3: Execute Claude CLI (three-phase: analysis + implementation + review)
@@ -236,6 +236,46 @@ Please review the changes and merge when ready.`
       //   await this.workspaceManager.cleanup(workspace);
       // }
     }
+  }
+
+  private generateBranchName(content: string): string {
+    // Determine if it's a fix or feature based on keywords
+    const contentLower = content.toLowerCase();
+    const isFix = contentLower.includes('bug') ||
+                  contentLower.includes('fix') ||
+                  contentLower.includes('crash') ||
+                  contentLower.includes('error') ||
+                  contentLower.includes('issue') ||
+                  contentLower.includes('problem') ||
+                  contentLower.includes('broken');
+
+    const prefix = isFix ? 'fix' : 'feature';
+
+    // Extract title - first line or text before newline, remove markdown formatting
+    let title = content
+      .split('\n')[0]                          // First line
+      .replace(/^\*\*(.+)\*\*$/, '$1')         // Remove **bold**
+      .replace(/^#+\s*/, '')                   // Remove # headers
+      .trim();
+
+    // If title is too long, truncate to first meaningful part
+    if (title.length > 50) {
+      title = title.substring(0, 50);
+    }
+
+    // Sanitize for git branch name
+    const sanitized = title
+      .toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, '')           // Remove special chars
+      .replace(/\s+/g, '-')                    // Spaces to dashes
+      .replace(/-+/g, '-')                     // Multiple dashes to single
+      .replace(/^-|-$/g, '')                   // Remove leading/trailing dashes
+      .substring(0, 40);                       // Limit length
+
+    // Add timestamp to ensure uniqueness
+    const timestamp = Date.now().toString(36); // Short base36 timestamp
+
+    return `${prefix}/${sanitized}-${timestamp}`;
   }
 
   async stop(): Promise<void> {
