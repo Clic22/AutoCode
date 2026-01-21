@@ -265,7 +265,7 @@ class AutoCode {
     const needsReview = needsImplementation || ['implementation_done', 'review'].includes(initialStatus);
     const needsCommit = needsReview; // After review, we commit
     const needsPush = ['committed'].includes(initialStatus);
-    const needsMR = ['pushed'].includes(initialStatus);
+    const needsMR = ['pushed', 'mr_failed'].includes(initialStatus);
 
     // Phase 1: Analysis
     if (needsAnalysis) {
@@ -385,19 +385,25 @@ class AutoCode {
       const hasChanges = await this.gitManager.hasChanges(repoPath);
 
       if (!hasChanges) {
-        log('No changes were made by Claude');
-        await this.storage.updateWorkspaceStatus(request.id, 'completed');
-        await this.storage.markProcessed(request.id);
-        return;
+        // Check if there are already commits on this branch that need to be pushed
+        const hasCommitsToPush = await this.gitManager.hasCommitsToPush(repoPath, branchName);
+        if (!hasCommitsToPush) {
+          log('No changes were made by Claude and no commits to push');
+          await this.storage.updateWorkspaceStatus(request.id, 'completed');
+          await this.storage.markProcessed(request.id);
+          return;
+        }
+        log('No new changes, but there are commits to push. Skipping commit step.');
+        await this.storage.updateWorkspaceStatus(request.id, 'committed');
+      } else {
+        // Extract a meaningful title from the development prompt
+        const featureTitle = this.extractFeatureTitle(developmentPrompt || '', branchName);
+        const commitMessage = featureTitle;
+
+        await this.gitManager.commitAll(repoPath, commitMessage);
+        await this.storage.updateWorkspaceStatus(request.id, 'committed');
+        log('[Step 4] Changes committed.');
       }
-
-      // Extract a meaningful title from the development prompt
-      const featureTitle = this.extractFeatureTitle(developmentPrompt || '', branchName);
-      const commitMessage = featureTitle;
-
-      await this.gitManager.commitAll(repoPath, commitMessage);
-      await this.storage.updateWorkspaceStatus(request.id, 'committed');
-      log('[Step 4] Changes committed.');
     }
 
     // Step 5: Push to remote (only if not already pushed)

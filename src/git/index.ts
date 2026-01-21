@@ -332,6 +332,9 @@ export class GitManager implements GitOperations {
   async commitAll(repoPath: string, message: string): Promise<void> {
     const git = simpleGit(repoPath);
 
+    // Clean up Windows reserved filenames that can't be added to git
+    await this.cleanupWindowsReservedFiles(repoPath);
+
     // Stage all changes
     await git.add('.');
 
@@ -359,12 +362,52 @@ export class GitManager implements GitOperations {
     return status.files.length > 0;
   }
 
+  async hasCommitsToPush(repoPath: string, branchName: string): Promise<boolean> {
+    const git = simpleGit(repoPath);
+    try {
+      // Check if there are commits on the local branch that aren't on the remote
+      const result = await git.raw(['rev-list', '--count', `origin/${branchName}..HEAD`]);
+      const count = parseInt(result.trim(), 10);
+      return count > 0;
+    } catch {
+      // If origin/branchName doesn't exist, check if there are any local commits
+      try {
+        const log = await git.log({ maxCount: 1 });
+        return log.total > 0;
+      } catch {
+        return false;
+      }
+    }
+  }
+
   private async directoryExists(dirPath: string): Promise<boolean> {
     try {
       const stat = await fs.stat(dirPath);
       return stat.isDirectory();
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Remove Windows reserved filenames that can't be added to git
+   * These are special device names on Windows: CON, PRN, AUX, NUL, COM1-9, LPT1-9
+   */
+  private async cleanupWindowsReservedFiles(repoPath: string): Promise<void> {
+    const reservedNames = [
+      'nul', 'con', 'prn', 'aux',
+      'com1', 'com2', 'com3', 'com4', 'com5', 'com6', 'com7', 'com8', 'com9',
+      'lpt1', 'lpt2', 'lpt3', 'lpt4', 'lpt5', 'lpt6', 'lpt7', 'lpt8', 'lpt9',
+    ];
+
+    for (const name of reservedNames) {
+      const filePath = path.join(repoPath, name);
+      try {
+        await fs.unlink(filePath);
+        console.log(`[Git] Removed Windows reserved file: ${name}`);
+      } catch {
+        // File doesn't exist, which is fine
+      }
     }
   }
 
