@@ -6,7 +6,7 @@ dotenv.config();
 export interface Config {
   discord: {
     botToken: string;
-    channelId: string;
+    channelIds: string[];
     approvalEmoji: string;
   };
   gitlab: {
@@ -28,10 +28,14 @@ function getEnvOrThrow(key: string): string {
 }
 
 export function loadConfig(): Config {
+  // Support comma-separated channel IDs
+  const channelIdsRaw = getEnvOrThrow('DISCORD_CHANNEL_ID');
+  const channelIds = channelIdsRaw.split(',').map(id => id.trim()).filter(id => id.length > 0);
+
   return {
     discord: {
       botToken: getEnvOrThrow('DISCORD_BOT_TOKEN'),
-      channelId: getEnvOrThrow('DISCORD_CHANNEL_ID'),
+      channelIds,
       approvalEmoji: process.env.APPROVAL_EMOJI || '✅',
     },
     gitlab: {

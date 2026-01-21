@@ -32,14 +32,14 @@ export interface DiscordBotEvents {
 
 export class DiscordBot {
   private client: Client;
-  private channelId: string;
+  private channelIds: string[];
   private approvalEmoji: string;
   private events: DiscordBotEvents;
   private storage: Storage;
   private sessionProcessed: Set<string> = new Set();
 
-  constructor(channelId: string, approvalEmoji: string, events: DiscordBotEvents, storage: Storage) {
-    this.channelId = channelId;
+  constructor(channelIds: string[], approvalEmoji: string, events: DiscordBotEvents, storage: Storage) {
+    this.channelIds = channelIds;
     this.approvalEmoji = approvalEmoji;
     this.events = events;
     this.storage = storage;
@@ -60,7 +60,7 @@ export class DiscordBot {
   private setupEventHandlers(): void {
     this.client.on('ready', () => {
       console.log(`[Discord] Bot logged in as ${this.client.user?.tag}`);
-      console.log(`[Discord] Monitoring channel: ${this.channelId}`);
+      console.log(`[Discord] Monitoring channels: ${this.channelIds.join(', ')}`);
       console.log(`[Discord] Approval emoji: ${this.approvalEmoji}`);
     });
 
@@ -92,16 +92,16 @@ export class DiscordBot {
         await message.fetch();
       }
 
-      // Check if the message is in the forum channel or in a thread of the forum channel
+      // Check if the message is in one of the monitored channels or in a thread of one
       const channel = message.channel;
-      let isInForumChannel = message.channelId === this.channelId;
+      let isInMonitoredChannel = this.channelIds.includes(message.channelId);
 
-      // If it's a thread, check if the parent is our forum channel
-      if (!isInForumChannel && channel.isThread()) {
-        isInForumChannel = channel.parentId === this.channelId;
+      // If it's a thread, check if the parent is one of our monitored channels
+      if (!isInMonitoredChannel && channel.isThread()) {
+        isInMonitoredChannel = this.channelIds.includes(channel.parentId || '');
       }
 
-      if (!isInForumChannel) {
+      if (!isInMonitoredChannel) {
         return;
       }
 
@@ -168,35 +168,46 @@ export class DiscordBot {
   }
 
   async scanChannelForApprovedMessages(): Promise<CodeRequest[]> {
-    console.log('[Discord] Scanning channel for approved messages...');
-    console.log(`[Discord] Channel ID: ${this.channelId}`);
+    console.log('[Discord] Scanning channels for approved messages...');
+    console.log(`[Discord] Channel IDs: ${this.channelIds.join(', ')}`);
 
-    try {
-      const channel = await this.client.channels.fetch(this.channelId);
+    const allApprovedRequests: CodeRequest[] = [];
 
-      if (!channel) {
-        console.error('[Discord] Channel not found. Check DISCORD_CHANNEL_ID in .env');
-        return [];
+    for (const channelId of this.channelIds) {
+      try {
+        console.log(`[Discord] Scanning channel: ${channelId}`);
+        const channel = await this.client.channels.fetch(channelId);
+
+        if (!channel) {
+          console.error(`[Discord] Channel ${channelId} not found. Check DISCORD_CHANNEL_ID in .env`);
+          continue;
+        }
+
+        console.log(`[Discord] Channel ${channelId} type: ${channel.type}`);
+
+        let requests: CodeRequest[] = [];
+
+        // Handle Forum Channel (type 15)
+        if (channel.type === ChannelType.GuildForum) {
+          requests = await this.scanForumChannel(channel as ForumChannel);
+        }
+        // Handle Text Channel (type 0)
+        else if (channel instanceof TextChannel) {
+          requests = await this.scanTextChannel(channel);
+        } else {
+          console.error(`[Discord] Unsupported channel type for ${channelId}:`, channel.type);
+        }
+
+        allApprovedRequests.push(...requests);
+      } catch (error) {
+        console.error(`[Discord] Error scanning channel ${channelId}:`, error);
       }
-
-      console.log(`[Discord] Channel type: ${channel.type}`);
-
-      // Handle Forum Channel (type 15)
-      if (channel.type === ChannelType.GuildForum) {
-        return await this.scanForumChannel(channel as ForumChannel);
-      }
-
-      // Handle Text Channel (type 0)
-      if (channel instanceof TextChannel) {
-        return await this.scanTextChannel(channel);
-      }
-
-      console.error('[Discord] Unsupported channel type:', channel.type);
-      return [];
-    } catch (error) {
-      console.error('[Discord] Error scanning channel:', error);
-      return [];
     }
+
+    // Sort all requests by timestamp (oldest first)
+    allApprovedRequests.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+    console.log(`[Discord] Total scan complete. Found ${allApprovedRequests.length} approved requests across all channels.`);
+    return allApprovedRequests;
   }
 
   private async scanForumChannel(forum: ForumChannel): Promise<CodeRequest[]> {

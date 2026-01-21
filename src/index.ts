@@ -42,7 +42,7 @@ class AutoCode {
 
     // Initialize Discord bot with event handlers and storage
     this.discord = new DiscordBot(
-      config.discord.channelId,
+      config.discord.channelIds,
       config.discord.approvalEmoji,
       {
         onRequestApproved: this.handleApprovedRequest.bind(this),
