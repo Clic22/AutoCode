@@ -538,12 +538,17 @@ Do NOT repeat the same mistakes.
     if (acceptanceCriteriaMatch) {
       const criteria = acceptanceCriteriaMatch[1].trim();
       // Convert numbered list or bullet points to checkbox format
+      // Only top-level items get checkboxes, sub-items become regular bullet points
       const lines = criteria.split('\n')
-        .map(line => line.trim())
-        .filter(line => line.length > 0)
+        .filter(line => line.trim().length > 0)
         .map(line => {
+          // Check if this is an indented sub-item (has leading whitespace)
+          const leadingWhitespace = line.match(/^(\s*)/)?.[1] || '';
+          const isSubItem = leadingWhitespace.length > 0;
+          const trimmedLine = line.trim();
+
           // Remove existing checkbox markers and numbering
-          let cleaned = line
+          let cleaned = trimmedLine
             .replace(/^\d+\.\s*\[[ x]\]\s*/, '')  // Remove "1. [ ]" or "1. [x]"
             .replace(/^\d+\.\s*/, '')              // Remove "1. "
             .replace(/^[-*]\s*\[[ x]\]\s*/, '')   // Remove "- [ ]" or "- [x]"
@@ -551,6 +556,11 @@ Do NOT repeat the same mistakes.
             .trim();
 
           if (cleaned.length > 0) {
+            if (isSubItem) {
+              // Sub-items get regular bullet points, indented
+              return `  - ${cleaned}`;
+            }
+            // Top-level items get checkboxes
             return `- [ ] ${cleaned}`;
           }
           return '';
@@ -570,16 +580,24 @@ Do NOT repeat the same mistakes.
     if (requirementsMatch) {
       const requirements = requirementsMatch[1].trim();
       const lines = requirements.split('\n')
-        .map(line => line.trim())
-        .filter(line => line.length > 0 && /^[\d\-*]/.test(line))
+        .filter(line => line.trim().length > 0 && /^[\s]*[\d\-*]/.test(line))
         .map(line => {
-          let cleaned = line
+          // Check if this is an indented sub-item
+          const leadingWhitespace = line.match(/^(\s*)/)?.[1] || '';
+          const isSubItem = leadingWhitespace.length > 0;
+          const trimmedLine = line.trim();
+
+          let cleaned = trimmedLine
             .replace(/^\d+\.\s*\*\*([^*]+)\*\*:?\s*/, '$1: ')  // Handle "1. **Title**: desc"
             .replace(/^\d+\.\s*/, '')
+            .replace(/^[-*]\s*\[[ x]\]\s*/, '')  // Remove existing checkboxes
             .replace(/^[-*]\s*/, '')
             .trim();
 
           if (cleaned.length > 0) {
+            if (isSubItem) {
+              return `  - ${cleaned}`;
+            }
             return `- [ ] Vérifier: ${cleaned}`;
           }
           return '';
