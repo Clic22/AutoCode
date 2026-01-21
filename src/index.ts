@@ -44,6 +44,7 @@ class AutoCode {
     this.discord = new DiscordBot(
       config.discord.channelIds,
       config.discord.approvalEmoji,
+      config.discord.approvedUsers,
       {
         onRequestApproved: this.handleApprovedRequest.bind(this),
       },

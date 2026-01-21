@@ -8,6 +8,7 @@ export interface Config {
     botToken: string;
     channelIds: string[];
     approvalEmoji: string;
+    approvedUsers: string[];
   };
   gitlab: {
     url: string;
@@ -32,11 +33,16 @@ export function loadConfig(): Config {
   const channelIdsRaw = getEnvOrThrow('DISCORD_CHANNEL_ID');
   const channelIds = channelIdsRaw.split(',').map(id => id.trim()).filter(id => id.length > 0);
 
+  // Support comma-separated approved users
+  const approvedUsersRaw = process.env.APPROVED_USERS || '';
+  const approvedUsers = approvedUsersRaw.split(',').map(u => u.trim()).filter(u => u.length > 0);
+
   return {
     discord: {
       botToken: getEnvOrThrow('DISCORD_BOT_TOKEN'),
       channelIds,
       approvalEmoji: process.env.APPROVAL_EMOJI || '✅',
+      approvedUsers,
     },
     gitlab: {
       url: process.env.GITLAB_URL || 'http://gitlab.totemmedia.com',

@@ -34,13 +34,15 @@ export class DiscordBot {
   private client: Client;
   private channelIds: string[];
   private approvalEmoji: string;
+  private approvedUsers: string[];
   private events: DiscordBotEvents;
   private storage: Storage;
   private sessionProcessed: Set<string> = new Set();
 
-  constructor(channelIds: string[], approvalEmoji: string, events: DiscordBotEvents, storage: Storage) {
+  constructor(channelIds: string[], approvalEmoji: string, approvedUsers: string[], events: DiscordBotEvents, storage: Storage) {
     this.channelIds = channelIds;
     this.approvalEmoji = approvalEmoji;
+    this.approvedUsers = approvedUsers;
     this.events = events;
     this.storage = storage;
 
@@ -78,6 +80,14 @@ export class DiscordBot {
     return emojiIdentifier === this.approvalEmoji || emoji.toString() === this.approvalEmoji;
   }
 
+  private isApprovedUser(username: string): boolean {
+    // If no approved users configured, allow all
+    if (this.approvedUsers.length === 0) {
+      return true;
+    }
+    return this.approvedUsers.includes(username);
+  }
+
   private async handleReaction(
     reaction: MessageReaction | PartialMessageReaction,
     user: User | PartialUser
@@ -109,6 +119,13 @@ export class DiscordBot {
         return;
       }
 
+      // Check if user is authorized to approve
+      const username = user.username || 'unknown';
+      if (!this.isApprovedUser(username)) {
+        console.log(`[Discord] User ${username} is not authorized to approve, ignoring`);
+        return;
+      }
+
       if (this.storage.isProcessed(message.id) || this.sessionProcessed.has(message.id)) {
         console.log(`[Discord] Message ${message.id} already processed, skipping`);
         return;
@@ -116,7 +133,7 @@ export class DiscordBot {
 
       this.sessionProcessed.add(message.id);
 
-      console.log(`[Discord] Approval detected on message ${message.id} by ${user.username}`);
+      console.log(`[Discord] Approval detected on message ${message.id} by ${username}`);
 
       const request = await this.buildCodeRequest(message as Message, user.username || 'unknown');
       await this.events.onRequestApproved(request);
@@ -242,27 +259,39 @@ export class DiscordBot {
         const reactions = starterMessage.reactions.cache;
         for (const reaction of reactions.values()) {
           if (this.isApprovalEmoji(reaction.emoji)) {
-            console.log(`[Discord] Found approved thread: ${thread.name} (${thread.id})`);
-
-            // Get who approved it
-            let approvedBy = 'unknown';
+            // Get who approved it and check if they're authorized
+            let approvedBy: string | null = null;
             try {
               const users = await reaction.users.fetch();
-              const approver = users.first();
-              if (approver) {
-                approvedBy = approver.username;
+              // Find the first approved user who reacted
+              for (const reactionUser of users.values()) {
+                if (this.isApprovedUser(reactionUser.username)) {
+                  approvedBy = reactionUser.username;
+                  break;
+                }
               }
             } catch (error) {
               console.error('[Discord] Error fetching reaction users:', error);
             }
 
+            // Skip if no authorized user approved
+            if (!approvedBy) {
+              continue;
+            }
+
+            console.log(`[Discord] Found approved thread: ${thread.name} (${thread.id}) by ${approvedBy}`);
             this.sessionProcessed.add(thread.id);
             const request = await this.buildCodeRequestFromThread(thread, starterMessage, approvedBy);
             approvedRequests.push(request);
             break;
           }
         }
-      } catch (error) {
+      } catch (error: unknown) {
+        // Handle "Unknown Message" error (10008) - starter message was deleted
+        if (error instanceof Error && 'code' in error && (error as { code: number }).code === 10008) {
+          console.log(`[Discord] Starter message for thread ${thread.id} was deleted, skipping`);
+          continue;
+        }
         console.error(`[Discord] Error processing thread ${thread.id}:`, error);
       }
     }
@@ -328,19 +357,27 @@ export class DiscordBot {
         const reactions = message.reactions.cache;
         for (const reaction of reactions.values()) {
           if (this.isApprovalEmoji(reaction.emoji)) {
-            console.log(`[Discord] Found approved message: ${message.id}`);
-
-            let approvedBy = 'unknown';
+            // Get who approved it and check if they're authorized
+            let approvedBy: string | null = null;
             try {
               const users = await reaction.users.fetch();
-              const approver = users.first();
-              if (approver) {
-                approvedBy = approver.username;
+              // Find the first approved user who reacted
+              for (const reactionUser of users.values()) {
+                if (this.isApprovedUser(reactionUser.username)) {
+                  approvedBy = reactionUser.username;
+                  break;
+                }
               }
             } catch (error) {
               console.error('[Discord] Error fetching reaction users:', error);
             }
 
+            // Skip if no authorized user approved
+            if (!approvedBy) {
+              continue;
+            }
+
+            console.log(`[Discord] Found approved message: ${message.id} by ${approvedBy}`);
             this.sessionProcessed.add(message.id);
             const request = await this.buildCodeRequest(message, approvedBy);
             approvedRequests.push(request);
