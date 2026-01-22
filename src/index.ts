@@ -88,7 +88,17 @@ class AutoCode {
     // Check for incomplete workspaces from previous runs BEFORE starting monitor
     // This ensures the monitor can scan for comments on resumed workspaces
     console.log('\n[AutoCode] Checking for incomplete workspaces to resume...');
-    const incompleteWorkspaces = this.storage.getIncompleteWorkspaces();
+    const allIncompleteWorkspaces = this.storage.getIncompleteWorkspaces();
+
+    // Filter out workspaces in ideation_complete status - they're waiting for user approval (emoji)
+    // Only resume workspaces that are actively being processed
+    const incompleteWorkspaces = allIncompleteWorkspaces.filter(ws => ws.status !== 'ideation_complete');
+
+    if (allIncompleteWorkspaces.length > incompleteWorkspaces.length) {
+      const waitingCount = allIncompleteWorkspaces.length - incompleteWorkspaces.length;
+      console.log(`[AutoCode] ${waitingCount} workspace(s) waiting for approval emoji (ideation_complete)`);
+    }
+
     if (incompleteWorkspaces.length > 0) {
       console.log(`[AutoCode] Found ${incompleteWorkspaces.length} incomplete workspace(s) to resume`);
       for (const ws of incompleteWorkspaces) {
@@ -504,7 +514,7 @@ class AutoCode {
     let developmentPrompt = workspaceInfo.developmentPrompt;
 
     // Determine which phases need to run based on initial status
-    const needsAnalysis = ['created', 'analysis'].includes(initialStatus);
+    const needsAnalysis = ['created', 'analysis', 'ideation_complete'].includes(initialStatus);
     const needsImplementation = needsAnalysis || ['analysis_done', 'implementation', 'review_failed', 'mr_feedback_received'].includes(initialStatus);
     const needsReview = needsImplementation || ['implementation_done', 'review'].includes(initialStatus);
     const needsCommit = needsReview; // After review, we commit
@@ -622,7 +632,7 @@ class AutoCode {
         await this.storage.updateWorkspaceStatus(request.id, 'review');
 
         log(`[Phase 3] QA Review (Attempt ${attempt}/${MAX_ATTEMPTS})...`);
-        const reviewResult = await this.claudeOrchestrator.reviewImplementation(repoPath, developmentPrompt, branchName);
+        const reviewResult = await this.claudeOrchestrator.reviewImplementation(repoPath, developmentPrompt, previousFeedback, branchName);
 
         // Save review result
         const reviewFilePath = path.join(workspace.path, `review-attempt-${attempt}.md`);

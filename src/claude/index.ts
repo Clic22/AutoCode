@@ -103,11 +103,12 @@ export class ClaudeOrchestrator {
   async reviewImplementation(
     repoPath: string,
     developmentPrompt: string,
+    previousFeedback?: string,
     branchName?: string
   ): Promise<ReviewResult> {
     const log = (msg: string) => console.log(branchName ? `[${branchName}] ${msg}` : `[Claude] ${msg}`);
     log('Starting QA review (Phase 3)...');
-    const reviewPrompt = this.buildReviewPrompt(developmentPrompt);
+    const reviewPrompt = this.buildReviewPrompt(developmentPrompt, previousFeedback);
     const result = await this.execute(repoPath, reviewPrompt, branchName);
 
     if (!result.success) {
@@ -180,7 +181,7 @@ export class ClaudeOrchestrator {
       log(`PHASE 3: QA Review (Attempt ${attempt}/${MAX_IMPLEMENTATION_ATTEMPTS})...`);
       console.log('='.repeat(50));
 
-      const reviewResult = await this.reviewImplementation(repoPath, developmentPrompt, branchName);
+      const reviewResult = await this.reviewImplementation(repoPath, developmentPrompt, previousFeedback, branchName);
 
       // Save review result
       const reviewFilePath = path.join(workspacePath || path.dirname(repoPath), `review-attempt-${attempt}.md`);
@@ -508,17 +509,40 @@ Please implement this feature now.`;
     return prompt;
   }
 
-  private buildReviewPrompt(developmentPrompt: string): string {
-    return `You are a senior QA engineer and code reviewer. Your job is to review the implementation that was just made.
+  private buildReviewPrompt(developmentPrompt: string, previousFeedback?: string): string {
+    let prompt = `You are a senior QA engineer and code reviewer. Your job is to review the implementation that was just made.
 
 ## Original Requirements
 ${developmentPrompt}
+`;
 
+    if (previousFeedback) {
+      prompt += `
+## 🚨 CRITICAL: Previous Feedback That MUST Be Addressed
+${previousFeedback}
+
+**IMPORTANT**: The implementation was modified based on the feedback above. You MUST verify that ALL feedback points have been properly addressed. If any feedback requirement is not met, you MUST REJECT the implementation.
+`;
+    }
+
+    prompt += `
 ## Your Task
 Review ALL the changes that were made in this repository. Use git diff or explore the modified files to understand what was implemented.
 
 ## Review Criteria
-Check for the following:
+Check for the following:`;
+
+    if (previousFeedback) {
+      prompt += `
+
+### 0. Feedback Compliance (HIGHEST PRIORITY)
+- Has EVERY point from the previous feedback been addressed?
+- Are the changes specifically targeting the feedback requirements?
+- Is there evidence in the code that the feedback was implemented correctly?
+`;
+    }
+
+    prompt += `
 
 ### 1. Crashes & Stability
 - Null pointer / undefined access risks
@@ -547,7 +571,16 @@ You MUST output your review in this exact format:
 
 ### Review Status
 **APPROVED** or **REJECTED**
+`;
 
+    if (previousFeedback) {
+      prompt += `
+### Feedback Verification
+[For each feedback point, state whether it was addressed and how]
+`;
+    }
+
+    prompt += `
 ### Issues Found
 [If REJECTED, list ALL issues that must be fixed, numbered]
 
@@ -559,6 +592,8 @@ You MUST output your review in this exact format:
 
 ---
 Now review the implementation:`;
+
+    return prompt;
   }
 
   private async execute(repoPath: string, prompt: string, branchName?: string, retryCount: number = 0): Promise<ClaudeResult> {

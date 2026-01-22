@@ -121,20 +121,30 @@ export class DiscordBot {
         await message.fetch();
       }
 
-      // Check if the message is in one of the monitored channels or in a thread of one
+      // Check if the message is in one of the monitored channels (public or private) or in a thread of one
       const channel = message.channel;
-      let isInMonitoredChannel = this.channelIds.includes(message.channelId);
+      let isInMonitoredChannel = this.channelIds.includes(message.channelId) || this.privateChannelIds.includes(message.channelId);
 
-      // If it's a thread, check if the parent is one of our monitored channels
+      // If it's a thread, check if the parent is one of our monitored channels (public or private)
       if (!isInMonitoredChannel && channel.isThread()) {
-        isInMonitoredChannel = this.channelIds.includes(channel.parentId || '');
+        const parentId = channel.parentId || '';
+        isInMonitoredChannel = this.channelIds.includes(parentId) || this.privateChannelIds.includes(parentId);
       }
 
       if (!isInMonitoredChannel) {
         return;
       }
 
+      console.log(`[Discord] Reaction detected on message ${message.id} in monitored channel`);
+
       if (!this.isApprovalEmoji(reaction.emoji)) {
+        console.log(`[Discord] Not approval emoji (expected: ${this.approvalEmoji}, got: ${reaction.emoji.name || reaction.emoji.toString()}), ignoring`);
+        return;
+      }
+
+      // Ignore bot reactions
+      if (user.bot) {
+        console.log(`[Discord] Bot reaction, ignoring`);
         return;
       }
 
@@ -152,7 +162,7 @@ export class DiscordBot {
 
       this.sessionProcessed.add(message.id);
 
-      console.log(`[Discord] Approval detected on message ${message.id} by ${username}`);
+      console.log(`[Discord] ✅ Approval detected on message ${message.id} by ${username}`);
 
       const request = await this.buildCodeRequest(message as Message, user.username || 'unknown');
       await this.events.onRequestApproved(request);
@@ -330,6 +340,7 @@ export class DiscordBot {
   private async buildCodeRequest(message: Message, approvedBy: string): Promise<CodeRequest> {
     let threadMessages: string[] = [];
 
+    // Case 1: Message has a thread attached (text channel with thread)
     if (message.hasThread && message.thread) {
       try {
         const thread = message.thread;
@@ -338,6 +349,21 @@ export class DiscordBot {
           .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
           .map((m) => `${m.author.username}: ${m.content}`)
           .filter((content) => content.trim());
+        console.log(`[Discord] Collected ${threadMessages.length} thread messages (attached thread)`);
+      } catch (error) {
+        console.error('[Discord] Error fetching thread messages:', error);
+      }
+    }
+    // Case 2: Message IS in a thread (forum channel)
+    else if (message.channel.isThread()) {
+      try {
+        const thread = message.channel as ThreadChannel;
+        const messages = await thread.messages.fetch({ limit: 100 });
+        threadMessages = messages
+          .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
+          .map((m) => `${m.author.username}: ${m.content}`)
+          .filter((content) => content.trim());
+        console.log(`[Discord] Collected ${threadMessages.length} thread messages (forum thread)`);
       } catch (error) {
         console.error('[Discord] Error fetching thread messages:', error);
       }
