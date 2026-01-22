@@ -3,6 +3,9 @@ import path from 'path';
 
 export type WorkspaceStatus =
   | 'created'           // Workspace created, nothing done yet
+  | 'ideation_pending'  // New message in private channel, ideation not started yet
+  | 'ideation_in_progress' // Ideation phase active, asking questions
+  | 'ideation_complete' // Ideation done, waiting for approval emoji
   | 'analysis'          // Phase 1: Analysis in progress
   | 'analysis_done'     // Phase 1 complete, prompt generated
   | 'implementation'    // Phase 2: Implementation in progress
@@ -29,6 +32,10 @@ export interface WorkspaceInfo {
   mrUrl?: string;               // Merge request URL if created
   lastFeedbackAt?: number;      // Timestamp of last feedback received
   feedbackCount?: number;       // Number of feedback rounds processed
+  // Ideation phase tracking
+  threadId?: string;            // Discord thread ID for ideation conversation
+  ideationConversation?: string[]; // Messages in ideation conversation
+  lastIdeationTimestamp?: number; // Last ideation message timestamp
   createdAt: number;
   updatedAt: number;
 }
@@ -142,7 +149,7 @@ export class Storage {
   async updateWorkspaceStatus(
     messageId: string,
     status: WorkspaceStatus,
-    extra?: Partial<Pick<WorkspaceInfo, 'developmentPrompt' | 'lastError' | 'mrUrl' | 'attempt' | 'lastFeedbackAt' | 'feedbackCount'>>
+    extra?: Partial<Pick<WorkspaceInfo, 'developmentPrompt' | 'lastError' | 'mrUrl' | 'attempt' | 'lastFeedbackAt' | 'feedbackCount' | 'threadId' | 'ideationConversation' | 'lastIdeationTimestamp' | 'workspacePath' | 'repoPath'>>
   ): Promise<void> {
     const workspace = this.data.workspaces[messageId];
     if (workspace) {
@@ -155,6 +162,11 @@ export class Storage {
         if (extra.attempt !== undefined) workspace.attempt = extra.attempt;
         if (extra.lastFeedbackAt !== undefined) workspace.lastFeedbackAt = extra.lastFeedbackAt;
         if (extra.feedbackCount !== undefined) workspace.feedbackCount = extra.feedbackCount;
+        if (extra.threadId !== undefined) workspace.threadId = extra.threadId;
+        if (extra.ideationConversation !== undefined) workspace.ideationConversation = extra.ideationConversation;
+        if (extra.lastIdeationTimestamp !== undefined) workspace.lastIdeationTimestamp = extra.lastIdeationTimestamp;
+        if (extra.workspacePath !== undefined) workspace.workspacePath = extra.workspacePath;
+        if (extra.repoPath !== undefined) workspace.repoPath = extra.repoPath;
       }
       await this.save();
       console.log(`[Storage] Updated workspace ${messageId} status: ${status}`);

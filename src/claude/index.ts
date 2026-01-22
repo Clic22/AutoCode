@@ -16,11 +16,55 @@ export interface ReviewResult {
 
 const MAX_IMPLEMENTATION_ATTEMPTS = 3;
 
+export interface IdeationResult {
+  needsMoreInfo: boolean;
+  questions?: string;
+  summary?: string;
+}
+
 export class ClaudeOrchestrator {
   private cliPath: string;
 
   constructor(cliPath: string = 'claude') {
     this.cliPath = cliPath;
+  }
+
+  /**
+   * Phase 0: Initial Ideation - Ask clarifying questions about the request
+   */
+  async startIdeation(
+    repoPath: string,
+    userMessage: string,
+    branchName?: string
+  ): Promise<ClaudeResult> {
+    const log = (msg: string) => console.log(branchName ? `[${branchName}] ${msg}` : `[Claude] ${msg}`);
+    log('Starting ideation (Phase 0 - Initial)...');
+    const ideationPrompt = this.buildInitialIdeationPrompt(userMessage);
+    return this.execute(repoPath, ideationPrompt, branchName);
+  }
+
+  /**
+   * Phase 0: Continue Ideation - Analyze conversation and decide next steps
+   */
+  async continueIdeation(
+    repoPath: string,
+    conversation: string[],
+    branchName?: string
+  ): Promise<IdeationResult> {
+    const log = (msg: string) => console.log(branchName ? `[${branchName}] ${msg}` : `[Claude] ${msg}`);
+    log('Continuing ideation (Phase 0 - Analysis)...');
+    const analysisPrompt = this.buildIdeationAnalysisPrompt(conversation);
+    const result = await this.execute(repoPath, analysisPrompt, branchName);
+
+    if (!result.success) {
+      // If analysis fails, assume we need more info
+      return {
+        needsMoreInfo: true,
+        questions: 'Could you provide more details about your request?',
+      };
+    }
+
+    return this.parseIdeationResult(result.output);
   }
 
   /**
@@ -257,6 +301,127 @@ ${reviewResult.feedback}
 `;
 
     await fs.writeFile(filePath, content, 'utf-8');
+  }
+
+  private buildInitialIdeationPrompt(userMessage: string): string {
+    return `You are a senior software architect helping to understand a feature request.
+
+## Your Task
+The user has posted the following request. Your goal is to ask clarifying questions to better understand their needs BEFORE any implementation begins.
+
+## User's Request:
+${userMessage}
+
+## Instructions
+1. Read and understand what the user is asking for
+2. Think about what information you would need to implement this properly
+3. Ask 3-5 specific, targeted questions to clarify:
+   - Technical requirements (specific technologies, approaches, constraints)
+   - Expected behavior and edge cases
+   - User experience considerations
+   - Integration points with existing systems
+   - Any ambiguities in the request
+
+## Important Rules
+- Ask SPECIFIC questions, not generic ones
+- Focus on what you truly need to know to implement this correctly
+- Keep questions concise and easy to answer
+- Number your questions (1. 2. 3. etc.)
+- Do NOT implement anything yet
+- Do NOT write code
+
+## Output Format
+Generate a numbered list of clarifying questions. Example:
+
+1. Should this feature work with the existing authentication system, or does it need a new login flow?
+2. What should happen if [edge case]?
+3. Are there any performance requirements or constraints?
+
+Now, ask your clarifying questions:`;
+  }
+
+  private buildIdeationAnalysisPrompt(conversation: string[]): string {
+    const conversationText = conversation.join('\n\n');
+
+    return `You are a senior software architect analyzing a requirements gathering conversation.
+
+## Conversation So Far:
+${conversationText}
+
+## Your Task
+Analyze the conversation and determine if you have enough information to create a detailed development prompt.
+
+## Decision Criteria
+You have ENOUGH information if:
+- The core functionality is clearly defined
+- Technical approach is understood
+- Major edge cases are addressed
+- Integration points are clear
+- You can write a specific, actionable development prompt
+
+You need MORE information if:
+- Critical details are still ambiguous
+- Important edge cases are not addressed
+- Technical approach needs clarification
+- There are contradictions or uncertainties
+
+## Output Format
+You MUST output in this EXACT format:
+
+**DECISION: READY** or **DECISION: NEED_MORE_INFO**
+
+If READY:
+**SUMMARY:**
+[Write a brief 2-3 sentence summary of what will be implemented]
+
+If NEED_MORE_INFO:
+**QUESTIONS:**
+1. [First clarifying question]
+2. [Second clarifying question]
+3. [etc.]
+
+Now analyze the conversation and make your decision:`;
+  }
+
+  private parseIdeationResult(output: string): IdeationResult {
+    const outputLower = output.toLowerCase();
+
+    // Check for decision markers
+    const isReady = outputLower.includes('**decision: ready**') ||
+                   outputLower.includes('decision: ready') ||
+                   (outputLower.includes('ready') && outputLower.includes('summary'));
+
+    const needsMore = outputLower.includes('**decision: need_more_info**') ||
+                     outputLower.includes('decision: need_more_info') ||
+                     (outputLower.includes('need') && outputLower.includes('more'));
+
+    if (isReady && !needsMore) {
+      // Extract summary
+      const summaryMatch = output.match(/\*\*SUMMARY:\*\*\s*([\s\S]*?)(?=\n\n|\*\*|$)/i);
+      const summary = summaryMatch ? summaryMatch[1].trim() : 'Requirements gathered successfully.';
+
+      return {
+        needsMoreInfo: false,
+        summary,
+      };
+    }
+
+    // Extract questions
+    const questionsMatch = output.match(/\*\*QUESTIONS:\*\*\s*([\s\S]*?)(?=\n\n\*\*|$)/i);
+    let questions = questionsMatch ? questionsMatch[1].trim() : output;
+
+    // If we didn't find the QUESTIONS section, try to extract numbered list
+    if (!questionsMatch) {
+      const numberedQuestions = output.match(/(?:^|\n)\d+\.\s*.+/gm);
+      if (numberedQuestions && numberedQuestions.length > 0) {
+        questions = numberedQuestions.join('\n');
+      }
+    }
+
+    return {
+      needsMoreInfo: true,
+      questions: questions || 'Could you provide more details about your request?',
+    };
   }
 
   private buildAnalysisPrompt(discordContent: string, threadMessages?: string[]): string {

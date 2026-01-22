@@ -67,6 +67,10 @@ export class GitManager implements GitOperations {
     this.baseBranch = baseBranch;
   }
 
+  getBaseRepoPath(): string {
+    return this.baseRepoPath;
+  }
+
   private getAuthenticatedUrl(repoUrl: string): string {
     const url = new URL(repoUrl);
     url.username = 'oauth2';

@@ -47,8 +47,11 @@ class AutoCode {
       config.discord.channelIds,
       config.discord.approvalEmoji,
       config.discord.approvedUsers,
+      config.discord.privateChannelIds,
       {
         onRequestApproved: this.handleApprovedRequest.bind(this),
+        onIdeationStart: this.handleIdeationStart.bind(this),
+        onIdeationResponse: this.handleIdeationResponse.bind(this),
       },
       storage
     );
@@ -146,6 +149,135 @@ class AutoCode {
     await this.gitlabMonitor.startMonitoring();
 
     console.log('\n[AutoCode] Ready and waiting for new approved requests...');
+  }
+
+  private async handleIdeationStart(
+    messageId: string,
+    channelId: string,
+    threadId: string,
+    content: string,
+    author: string
+  ): Promise<void> {
+    console.log(`[AutoCode] Starting ideation for message ${messageId}`);
+
+    try {
+      // During ideation, we don't create a workspace yet
+      // We just use the base repo for exploration (read-only)
+      const baseRepoPath = this.gitManager.getBaseRepoPath();
+      const branchName = this.generateBranchName(content);
+
+      // Track ideation state without creating workspace
+      await this.storage.createWorkspace({
+        messageId,
+        workspacePath: '', // Will be created when approved
+        branchName,
+        repoPath: '', // Will be created when approved
+        status: 'ideation_pending',
+        attempt: 1,
+        threadId,
+      });
+
+      // Update status to in_progress
+      await this.storage.updateWorkspaceStatus(messageId, 'ideation_in_progress', {
+        ideationConversation: [`User: ${content}`],
+        lastIdeationTimestamp: Date.now(),
+      });
+
+      // Start ideation - ask initial questions using base repo
+      console.log(`[AutoCode] Asking Claude for clarifying questions (using base repo)...`);
+      const ideationResult = await this.claudeOrchestrator.startIdeation(baseRepoPath, content);
+
+      if (!ideationResult.success) {
+        throw new Error(`Ideation failed: ${ideationResult.error}`);
+      }
+
+      // Post Claude's questions to the thread
+      await this.discord.postToThread(threadId, ideationResult.output);
+
+      // Update conversation history
+      const workspace = this.storage.getWorkspace(messageId);
+      const conversation = workspace?.ideationConversation || [];
+      conversation.push(`Claude: ${ideationResult.output}`);
+
+      await this.storage.updateWorkspaceStatus(messageId, 'ideation_in_progress', {
+        ideationConversation: conversation,
+        lastIdeationTimestamp: Date.now(),
+      });
+
+      console.log(`[AutoCode] Posted questions to thread ${threadId}`);
+    } catch (error) {
+      console.error(`[AutoCode] Error starting ideation:`, error);
+      const workspace = this.storage.getWorkspace(messageId);
+      if (workspace) {
+        await this.storage.updateWorkspaceStatus(messageId, 'failed', {
+          lastError: error instanceof Error ? error.message : 'Unknown error',
+        });
+      }
+    }
+  }
+
+  private async handleIdeationResponse(messageId: string, threadId: string, response: string): Promise<void> {
+    console.log(`[AutoCode] User response in ideation for ${messageId}`);
+
+    try {
+      const workspace = this.storage.getWorkspace(messageId);
+      if (!workspace) {
+        console.error(`[AutoCode] Workspace not found for ${messageId}`);
+        return;
+      }
+
+      // Update conversation history
+      const conversation = workspace.ideationConversation || [];
+      conversation.push(`User: ${response}`);
+
+      await this.storage.updateWorkspaceStatus(messageId, 'ideation_in_progress', {
+        ideationConversation: conversation,
+        lastIdeationTimestamp: Date.now(),
+      });
+
+      // Ask Claude to analyze the conversation using base repo
+      console.log(`[AutoCode] Analyzing conversation to determine if ready...`);
+      const baseRepoPath = this.gitManager.getBaseRepoPath();
+      const analysisResult = await this.claudeOrchestrator.continueIdeation(
+        baseRepoPath,
+        conversation
+      );
+
+      if (analysisResult.needsMoreInfo && analysisResult.questions) {
+        // Claude needs more information - post follow-up questions
+        await this.discord.postToThread(threadId, analysisResult.questions);
+
+        conversation.push(`Claude: ${analysisResult.questions}`);
+        await this.storage.updateWorkspaceStatus(messageId, 'ideation_in_progress', {
+          ideationConversation: conversation,
+          lastIdeationTimestamp: Date.now(),
+        });
+
+        console.log(`[AutoCode] Posted follow-up questions to thread ${threadId}`);
+      } else {
+        // Claude is ready - mark ideation as complete
+        const readyMessage = `✅ **Ready for Implementation**\n\n${analysisResult.summary || 'I have enough information to proceed.'}\n\nWhen you're ready, add a ✅ reaction to the original message to start implementation.`;
+
+        await this.discord.postToThread(threadId, readyMessage);
+
+        await this.storage.updateWorkspaceStatus(messageId, 'ideation_complete', {
+          ideationConversation: conversation,
+          lastIdeationTimestamp: Date.now(),
+        });
+
+        console.log(`[AutoCode] Ideation complete for ${messageId}, waiting for approval`);
+      }
+    } catch (error) {
+      console.error(`[AutoCode] Error handling ideation response:`, error);
+      await this.storage.updateWorkspaceStatus(messageId, 'failed', {
+        lastError: error instanceof Error ? error.message : 'Unknown error',
+      });
+
+      // Notify user in thread
+      try {
+        await this.discord.postToThread(threadId, `❌ An error occurred during ideation: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      } catch {}
+    }
   }
 
   private async handleApprovedRequest(request: CodeRequest): Promise<void> {
@@ -266,24 +398,47 @@ class AutoCode {
         console.log(`${getLogPrefix()} Status: ${workspaceInfo.status}, Attempt: ${workspaceInfo.attempt}`);
         console.log(`${getLogPrefix()} Workspace: ${workspaceInfo.workspacePath}`);
 
-        // Verify workspace still exists on disk
-        const workspaceExists = await this.directoryExists(workspaceInfo.workspacePath);
-        const repoExists = await this.directoryExists(workspaceInfo.repoPath);
+        // Check if this is an ideation workspace (no actual workspace created yet)
+        if (!workspaceInfo.workspacePath || !workspaceInfo.repoPath) {
+          console.log(`${getLogPrefix()} Ideation complete, creating workspace for implementation...`);
 
-        if (!workspaceExists || !repoExists) {
-          console.log(`${getLogPrefix()} Workspace directory missing, will recreate...`);
-          await this.storage.deleteWorkspace(request.id);
-          workspaceInfo = undefined;
-          branchName = '';
-        } else {
-          workspace = {
-            id: request.id,
-            path: workspaceInfo.workspacePath,
-            requestId: request.id,
-            createdAt: new Date(workspaceInfo.createdAt),
-          };
+          // Create workspace and worktree now
+          workspace = await this.workspaceManager.create(request.id);
           branchName = workspaceInfo.branchName;
-          repoPath = workspaceInfo.repoPath;
+          repoPath = await this.gitManager.createWorktree(workspace, branchName);
+
+          // Update workspace info with actual paths
+          await this.storage.updateWorkspaceStatus(request.id, workspaceInfo.status, {
+            workspacePath: workspace.path,
+            repoPath: repoPath,
+          });
+
+          // Update the workspaceInfo object
+          workspaceInfo.workspacePath = workspace.path;
+          workspaceInfo.repoPath = repoPath;
+
+          console.log(`${getLogPrefix()} Workspace created: ${workspace.path}`);
+          console.log(`${getLogPrefix()} Worktree created: ${repoPath}`);
+        } else {
+          // Verify workspace still exists on disk
+          const workspaceExists = await this.directoryExists(workspaceInfo.workspacePath);
+          const repoExists = await this.directoryExists(workspaceInfo.repoPath);
+
+          if (!workspaceExists || !repoExists) {
+            console.log(`${getLogPrefix()} Workspace directory missing, will recreate...`);
+            await this.storage.deleteWorkspace(request.id);
+            workspaceInfo = undefined;
+            branchName = '';
+          } else {
+            workspace = {
+              id: request.id,
+              path: workspaceInfo.workspacePath,
+              requestId: request.id,
+              createdAt: new Date(workspaceInfo.createdAt),
+            };
+            branchName = workspaceInfo.branchName;
+            repoPath = workspaceInfo.repoPath;
+          }
         }
       }
 
