@@ -396,15 +396,19 @@ You MUST output your review in this exact format:
 Now review the implementation:`;
   }
 
-  private async execute(repoPath: string, prompt: string, branchName?: string): Promise<ClaudeResult> {
+  private async execute(repoPath: string, prompt: string, branchName?: string, retryCount: number = 0): Promise<ClaudeResult> {
     const log = (msg: string) => console.log(branchName ? `[${branchName}] ${msg}` : `[Claude] ${msg}`);
+    const MAX_RETRIES = 2;
 
-    // Write prompt to a temporary file
+    // Write prompt to a temporary file for debugging
     const promptFile = path.join(repoPath, '.autocode-prompt.txt');
     await fs.writeFile(promptFile, prompt, 'utf-8');
 
     log(`Starting CLI in: ${repoPath}`);
     log(`Prompt length: ${prompt.length} characters`);
+    if (retryCount > 0) {
+      log(`Retry attempt ${retryCount}/${MAX_RETRIES}`);
+    }
 
     return new Promise((resolve) => {
       const args = ['--print', '--dangerously-skip-permissions'];
@@ -442,8 +446,10 @@ Now review the implementation:`;
       proc.stderr.on('data', (data: Buffer) => {
         const text = data.toString();
         stderr += text;
-        // Filter out UI noise
-        if (text.trim() && !text.includes('─') && !text.includes('│') && !text.includes('╭') && !text.includes('╰')) {
+        // Always log errors that contain "Error:" or "No messages"
+        const isError = text.includes('Error:') || text.includes('No messages') || text.includes('rejected');
+        // Filter out UI noise but always show errors
+        if (text.trim() && (isError || (!text.includes('─') && !text.includes('│') && !text.includes('╭') && !text.includes('╰')))) {
           log(`stderr: ${text.trim()}`);
         }
       });
@@ -457,18 +463,51 @@ Now review the implementation:`;
         }
 
         log(`Process exited with code: ${code}`);
+        log(`stdout length: ${stdout.length} characters`);
+        log(`stderr length: ${stderr.length} characters`);
 
-        if (code === 0) {
+        // Check for "No messages returned" error in stderr
+        const hasNoMessagesError = stderr.includes('No messages returned') || stderr.includes('Error: No messages returned');
+
+        // Check if output is empty or too short (less than 50 chars is suspicious)
+        const outputTooShort = stdout.trim().length < 50;
+
+        if (code === 0 && !hasNoMessagesError && !outputTooShort) {
           resolve({
             success: true,
             output: stdout,
           });
         } else {
-          resolve({
-            success: false,
-            output: stdout,
-            error: stderr || `Process exited with code ${code}`,
-          });
+          const errorMessage = hasNoMessagesError
+            ? 'Claude CLI returned "No messages returned" - this usually means the prompt was too large, malformed, or there was a network issue'
+            : outputTooShort
+            ? `Claude CLI output too short (${stdout.trim().length} chars) - likely failed silently`
+            : stderr || `Process exited with code ${code}`;
+
+          // Retry logic for transient failures
+          if (retryCount < MAX_RETRIES && (hasNoMessagesError || outputTooShort)) {
+            log(`⚠️ Detected transient failure, will retry...`);
+            log(`Error was: ${errorMessage}`);
+
+            // Wait a bit before retrying (exponential backoff)
+            const delay = Math.pow(2, retryCount) * 1000; // 1s, 2s, 4s
+            log(`Waiting ${delay}ms before retry...`);
+
+            setTimeout(async () => {
+              const retryResult = await this.execute(repoPath, prompt, branchName, retryCount + 1);
+              resolve(retryResult);
+            }, delay);
+          } else {
+            if (retryCount >= MAX_RETRIES) {
+              log(`❌ Max retries (${MAX_RETRIES}) reached, giving up`);
+            }
+
+            resolve({
+              success: false,
+              output: stdout,
+              error: errorMessage,
+            });
+          }
         }
       });
 

@@ -82,10 +82,8 @@ class AutoCode {
     // Connect to Discord
     await this.discord.connect(this.config.discord.botToken);
 
-    // Start GitLab MR monitoring
-    await this.gitlabMonitor.startMonitoring();
-
-    // Check for incomplete workspaces from previous runs
+    // Check for incomplete workspaces from previous runs BEFORE starting monitor
+    // This ensures the monitor can scan for comments on resumed workspaces
     console.log('\n[AutoCode] Checking for incomplete workspaces to resume...');
     const incompleteWorkspaces = this.storage.getIncompleteWorkspaces();
     if (incompleteWorkspaces.length > 0) {
@@ -142,6 +140,11 @@ class AutoCode {
     // Update last scan timestamp
     await this.storage.updateLastScan();
 
+    // Start GitLab MR monitoring AFTER workspaces are loaded
+    // This ensures the first scan picks up any comments on resumed MRs
+    console.log('\n[AutoCode] Starting GitLab MR monitoring...');
+    await this.gitlabMonitor.startMonitoring();
+
     console.log('\n[AutoCode] Ready and waiting for new approved requests...');
   }
 
@@ -180,10 +183,11 @@ class AutoCode {
       'utf-8'
     );
 
-    // Update workspace status
+    // Update workspace status and reset attempt counter for new feedback cycle
     await this.storage.updateWorkspaceStatus(feedback.messageId, 'mr_feedback_received', {
       lastFeedbackAt: Date.now(),
       feedbackCount: (workspace.feedbackCount || 0) + 1,
+      attempt: 1, // Reset attempt counter for new feedback cycle
     });
 
     // Create CodeRequest for re-processing
