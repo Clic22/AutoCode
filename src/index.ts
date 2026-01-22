@@ -3,6 +3,7 @@ import { DiscordBot, CodeRequest } from './discord';
 import { WorkspaceManager, Workspace } from './workspace';
 import { GitManager } from './git';
 import { GitLabClient } from './gitlab';
+import { GitLabMonitor, FeedbackRequest } from './gitlab/monitor';
 import { ClaudeOrchestrator } from './claude';
 import { Storage, WorkspaceInfo, WorkspaceStatus } from './storage';
 import path from 'path';
@@ -16,6 +17,7 @@ class AutoCode {
   private workspaceManager: WorkspaceManager;
   private gitManager: GitManager;
   private gitlabClient: GitLabClient;
+  private gitlabMonitor: GitLabMonitor;
   private claudeOrchestrator: ClaudeOrchestrator;
   private storage: Storage;
   private activeRequests: number = 0;
@@ -50,6 +52,18 @@ class AutoCode {
       },
       storage
     );
+
+    // Initialize GitLab monitor for MR feedback loop
+    this.gitlabMonitor = new GitLabMonitor(
+      this.gitlabClient,
+      this.storage,
+      {
+        onFeedbackReceived: this.handleFeedbackReceived.bind(this),
+        onValidationApproved: this.handleValidationApproved.bind(this),
+      },
+      config.gitlab.mrPollingInterval || 60000,
+      config.discord.approvedUsers
+    );
   }
 
   async start(): Promise<void> {
@@ -67,6 +81,9 @@ class AutoCode {
 
     // Connect to Discord
     await this.discord.connect(this.config.discord.botToken);
+
+    // Start GitLab MR monitoring
+    await this.gitlabMonitor.startMonitoring();
 
     // Check for incomplete workspaces from previous runs
     console.log('\n[AutoCode] Checking for incomplete workspaces to resume...');
@@ -135,6 +152,73 @@ class AutoCode {
 
     // Try to process more requests
     this.processNextRequests();
+  }
+
+  private async handleFeedbackReceived(feedback: FeedbackRequest): Promise<void> {
+    console.log(`[AutoCode] Feedback received for workspace ${feedback.messageId} from ${feedback.author}`);
+    console.log(`[AutoCode] Feedback: ${feedback.feedback.substring(0, 200)}...`);
+
+    const workspace = this.storage.getWorkspace(feedback.messageId);
+    if (!workspace) {
+      console.error(`[AutoCode] Workspace not found for ${feedback.messageId}`);
+      try {
+        await this.gitlabClient.addMRComment(
+          feedback.mrIid,
+          '⚠️ Workspace no longer exists, cannot apply feedback.'
+        );
+      } catch (error) {
+        console.error('[AutoCode] Failed to reply to MR:', error);
+      }
+      return;
+    }
+
+    // Save feedback to file
+    const feedbackFilePath = path.join(workspace.workspacePath, `feedback-${Date.now()}.md`);
+    await fs.writeFile(
+      feedbackFilePath,
+      `# Feedback from ${feedback.author}\n\nReceived: ${feedback.timestamp.toISOString()}\n\n${feedback.feedback}`,
+      'utf-8'
+    );
+
+    // Update workspace status
+    await this.storage.updateWorkspaceStatus(feedback.messageId, 'mr_feedback_received', {
+      lastFeedbackAt: Date.now(),
+      feedbackCount: (workspace.feedbackCount || 0) + 1,
+    });
+
+    // Create CodeRequest for re-processing
+    const feedbackRequest: CodeRequest = {
+      id: feedback.messageId,
+      messageId: feedback.messageId,
+      channelId: '',
+      content: feedback.feedback,
+      author: feedback.author,
+      approvedBy: feedback.author,
+      timestamp: feedback.timestamp,
+    };
+
+    // Add to queue
+    this.requestQueue.push(feedbackRequest);
+    console.log(`[AutoCode] Feedback request ${feedback.messageId} added to queue`);
+
+    // Try to process
+    this.processNextRequests();
+  }
+
+  private async handleValidationApproved(messageId: string): Promise<void> {
+    console.log(`[AutoCode] Validation approved for workspace ${messageId}`);
+
+    const workspace = this.storage.getWorkspace(messageId);
+    if (!workspace) {
+      console.error(`[AutoCode] Workspace not found for ${messageId}`);
+      return;
+    }
+
+    // Mark as completed
+    await this.storage.updateWorkspaceStatus(messageId, 'completed');
+    await this.storage.markProcessed(messageId);
+
+    console.log(`[AutoCode] ✅ Workspace ${messageId} completed and validated`);
   }
 
   private processNextRequests(): void {
@@ -262,11 +346,17 @@ class AutoCode {
 
     // Determine which phases need to run based on initial status
     const needsAnalysis = ['created', 'analysis'].includes(initialStatus);
-    const needsImplementation = needsAnalysis || ['analysis_done', 'implementation', 'review_failed'].includes(initialStatus);
+    const needsImplementation = needsAnalysis || ['analysis_done', 'implementation', 'review_failed', 'mr_feedback_received'].includes(initialStatus);
     const needsReview = needsImplementation || ['implementation_done', 'review'].includes(initialStatus);
     const needsCommit = needsReview; // After review, we commit
     const needsPush = ['committed'].includes(initialStatus);
     const needsMR = ['pushed', 'mr_failed'].includes(initialStatus);
+
+    // Handle awaiting_validation status - do nothing, just waiting for approval
+    if (initialStatus === 'awaiting_validation') {
+      log('Waiting for validation approval from MR comments...');
+      return;
+    }
 
     // Phase 1: Analysis
     if (needsAnalysis) {
@@ -322,6 +412,28 @@ class AutoCode {
           attempt++; // Move to next attempt
         } catch {
           // No previous review found, start fresh
+        }
+      }
+
+      // If we're resuming from MR feedback, load the feedback
+      if (initialStatus === 'mr_feedback_received') {
+        // Find the most recent feedback file
+        const files = await fs.readdir(workspace.path);
+        const feedbackFiles = files
+          .filter(f => f.startsWith('feedback-'))
+          .sort()
+          .reverse();
+
+        if (feedbackFiles.length > 0) {
+          const feedbackFilePath = path.join(workspace.path, feedbackFiles[0]);
+          const feedbackContent = await fs.readFile(feedbackFilePath, 'utf-8');
+          // Extract feedback text (everything after the header)
+          const match = feedbackContent.match(/Received: .+\n\n([\s\S]+)$/);
+          previousFeedback = match ? match[1].trim() : feedbackContent;
+          log(`Using feedback from ${feedbackFiles[0]}`);
+        } else {
+          log('Warning: No feedback file found, using request content as feedback');
+          previousFeedback = request.content;
         }
       }
 
@@ -411,7 +523,15 @@ class AutoCode {
     if ((needsCommit || needsPush) && !needsMR) {
       log('[Step 5] Pushing to remote...');
       await this.gitManager.push(repoPath, branchName);
-      await this.storage.updateWorkspaceStatus(request.id, 'pushed');
+
+      // If this is a feedback loop iteration, set status to awaiting_validation
+      if (workspaceInfo.mrUrl) {
+        await this.storage.updateWorkspaceStatus(request.id, 'awaiting_validation');
+        log('Changes pushed. Waiting for feedback or validation on MR...');
+        return;
+      } else {
+        await this.storage.updateWorkspaceStatus(request.id, 'pushed');
+      }
     }
 
     // Step 6: Create Merge Request
@@ -441,6 +561,17 @@ ${testChecklist}`,
 
       await this.storage.updateWorkspaceStatus(request.id, 'mr_created', { mrUrl: mrResult.webUrl });
       log(`[Step 6] MR created: ${mrResult.webUrl}`);
+
+      // Add MR to indexes for feedback loop
+      await this.storage.addMrUrlIndex(mrResult.webUrl, request.id);
+      await this.storage.addBranchIndex(branchName, request.id);
+    }
+
+    // After MR creation, don't mark as completed yet - wait for feedback loop
+    // The GitLabMonitor will handle the feedback loop and eventual completion
+    if (workspaceInfo.status === 'mr_created') {
+      log('Waiting for feedback or validation on MR...');
+      return;
     }
 
     // Step 7: Mark as completed

@@ -15,6 +15,7 @@ export interface Config {
     token: string;
     repoUrl: string;
     projectId: string;
+    mrPollingInterval?: number;
   };
   workspacesDir: string;
   claudeCliPath: string;
@@ -49,6 +50,9 @@ export function loadConfig(): Config {
       token: getEnvOrThrow('GITLAB_TOKEN'),
       repoUrl: process.env.GITLAB_REPO_URL || 'http://gitlab.totemmedia.com/Stephane/qtvghd.git',
       projectId: process.env.GITLAB_PROJECT_ID || 'Stephane/qtvghd',
+      mrPollingInterval: process.env.GITLAB_MR_POLLING_INTERVAL
+        ? parseInt(process.env.GITLAB_MR_POLLING_INTERVAL, 10)
+        : undefined,
     },
     workspacesDir: path.resolve(process.env.WORKSPACES_DIR || './workspaces'),
     claudeCliPath: process.env.CLAUDE_CLI_PATH || 'claude',

@@ -14,6 +14,20 @@ export interface MergeRequestResult {
   title: string;
 }
 
+export interface MRComment {
+  id: number;
+  body: string;
+  author: { username: string };
+  created_at: string;
+  system: boolean;
+}
+
+export interface MRInfo {
+  iid: number;
+  state: 'opened' | 'closed' | 'merged';
+  web_url: string;
+}
+
 export class GitLabClient {
   private client: AxiosInstance;
   private projectId: string;
@@ -193,5 +207,106 @@ export class GitLabClient {
   async getDefaultBranch(): Promise<string> {
     const response = await this.client.get(`/projects/${this.projectId}`);
     return response.data.default_branch || 'main';
+  }
+
+  // MR feedback loop methods
+
+  /**
+   * Extract MR IID from MR URL
+   * Example: https://gitlab.com/project/repo/-/merge_requests/42 -> 42
+   */
+  private extractMRIid(mrUrl: string): number {
+    const match = mrUrl.match(/merge_requests\/(\d+)/);
+    if (!match) {
+      throw new Error(`Cannot extract MR IID from URL: ${mrUrl}`);
+    }
+    return parseInt(match[1], 10);
+  }
+
+  /**
+   * Get comments on a merge request
+   * @param mrIid Merge request IID (internal ID, not the global ID)
+   * @param since Optional date to get comments created after this date
+   */
+  async getMRComments(mrIid: number, since?: Date): Promise<MRComment[]> {
+    console.log(`[GitLab] Fetching comments for MR !${mrIid}`);
+
+    try {
+      const response = await this.client.get(
+        `/projects/${this.projectId}/merge_requests/${mrIid}/notes`,
+        {
+          params: {
+            sort: 'asc',
+            order_by: 'created_at',
+          },
+        }
+      );
+
+      let comments: MRComment[] = response.data;
+
+      // Filter out system comments (like "mentioned in commit", "changed title", etc.)
+      comments = comments.filter(c => !c.system);
+
+      // Filter by date if provided
+      if (since) {
+        comments = comments.filter(c => new Date(c.created_at) > since);
+      }
+
+      console.log(`[GitLab] Found ${comments.length} comments on MR !${mrIid}`);
+      return comments;
+    } catch (error: any) {
+      console.error(`[GitLab] Failed to fetch MR comments: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Add a comment to a merge request
+   * @param mrIid Merge request IID
+   * @param body Comment text
+   */
+  async addMRComment(mrIid: number, body: string): Promise<void> {
+    console.log(`[GitLab] Adding comment to MR !${mrIid}`);
+
+    try {
+      await this.client.post(
+        `/projects/${this.projectId}/merge_requests/${mrIid}/notes`,
+        { body }
+      );
+      console.log(`[GitLab] Comment added successfully`);
+    } catch (error: any) {
+      console.error(`[GitLab] Failed to add MR comment: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Get merge request info (state, URL, etc.)
+   * @param mrIid Merge request IID
+   */
+  async getMRInfo(mrIid: number): Promise<MRInfo> {
+    console.log(`[GitLab] Fetching info for MR !${mrIid}`);
+
+    try {
+      const response = await this.client.get(
+        `/projects/${this.projectId}/merge_requests/${mrIid}`
+      );
+
+      return {
+        iid: response.data.iid,
+        state: response.data.state,
+        web_url: response.data.web_url,
+      };
+    } catch (error: any) {
+      console.error(`[GitLab] Failed to fetch MR info: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Get MR IID from URL (convenience method)
+   */
+  getMRIidFromUrl(mrUrl: string): number {
+    return this.extractMRIid(mrUrl);
   }
 }

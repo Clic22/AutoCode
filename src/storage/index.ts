@@ -12,6 +12,8 @@ export type WorkspaceStatus =
   | 'committed'         // Changes committed
   | 'pushed'            // Branch pushed to remote
   | 'mr_created'        // Merge request created
+  | 'mr_feedback_received' // Feedback command detected, queued for processing
+  | 'awaiting_validation'  // Changes pushed after feedback, waiting for approval
   | 'completed'         // Fully completed
   | 'failed';           // Failed with error
 
@@ -25,6 +27,8 @@ export interface WorkspaceInfo {
   developmentPrompt?: string;   // Saved prompt for resuming
   lastError?: string;           // Last error message if failed
   mrUrl?: string;               // Merge request URL if created
+  lastFeedbackAt?: number;      // Timestamp of last feedback received
+  feedbackCount?: number;       // Number of feedback rounds processed
   createdAt: number;
   updatedAt: number;
 }
@@ -33,6 +37,9 @@ export interface ProcessedData {
   processedMessageIds: string[];
   lastScanTimestamp: number;
   workspaces: Record<string, WorkspaceInfo>;  // messageId -> WorkspaceInfo
+  mrUrlIndex: Record<string, string>;         // mrUrl -> messageId
+  branchIndex: Record<string, string>;        // branchName -> messageId
+  processedCommentIds: string[];              // GitLab comment IDs
 }
 
 export class Storage {
@@ -45,6 +52,9 @@ export class Storage {
       processedMessageIds: [],
       lastScanTimestamp: 0,
       workspaces: {},
+      mrUrlIndex: {},
+      branchIndex: {},
+      processedCommentIds: [],
     };
   }
 
@@ -56,6 +66,9 @@ export class Storage {
         processedMessageIds: loaded.processedMessageIds || [],
         lastScanTimestamp: loaded.lastScanTimestamp || 0,
         workspaces: loaded.workspaces || {},
+        mrUrlIndex: loaded.mrUrlIndex || {},
+        branchIndex: loaded.branchIndex || {},
+        processedCommentIds: loaded.processedCommentIds || [],
       };
       console.log(`[Storage] Loaded ${this.data.processedMessageIds.length} processed message IDs`);
       console.log(`[Storage] Loaded ${Object.keys(this.data.workspaces).length} workspace records`);
@@ -66,6 +79,9 @@ export class Storage {
         processedMessageIds: [],
         lastScanTimestamp: 0,
         workspaces: {},
+        mrUrlIndex: {},
+        branchIndex: {},
+        processedCommentIds: [],
       };
     }
   }
@@ -126,7 +142,7 @@ export class Storage {
   async updateWorkspaceStatus(
     messageId: string,
     status: WorkspaceStatus,
-    extra?: Partial<Pick<WorkspaceInfo, 'developmentPrompt' | 'lastError' | 'mrUrl' | 'attempt'>>
+    extra?: Partial<Pick<WorkspaceInfo, 'developmentPrompt' | 'lastError' | 'mrUrl' | 'attempt' | 'lastFeedbackAt' | 'feedbackCount'>>
   ): Promise<void> {
     const workspace = this.data.workspaces[messageId];
     if (workspace) {
@@ -137,6 +153,8 @@ export class Storage {
         if (extra.lastError !== undefined) workspace.lastError = extra.lastError;
         if (extra.mrUrl !== undefined) workspace.mrUrl = extra.mrUrl;
         if (extra.attempt !== undefined) workspace.attempt = extra.attempt;
+        if (extra.lastFeedbackAt !== undefined) workspace.lastFeedbackAt = extra.lastFeedbackAt;
+        if (extra.feedbackCount !== undefined) workspace.feedbackCount = extra.feedbackCount;
       }
       await this.save();
       console.log(`[Storage] Updated workspace ${messageId} status: ${status}`);
@@ -159,5 +177,46 @@ export class Storage {
 
   getAllWorkspaces(): WorkspaceInfo[] {
     return Object.values(this.data.workspaces);
+  }
+
+  // MR feedback loop methods
+
+  getWorkspaceByMrUrl(mrUrl: string): WorkspaceInfo | undefined {
+    const messageId = this.data.mrUrlIndex[mrUrl];
+    return messageId ? this.data.workspaces[messageId] : undefined;
+  }
+
+  getWorkspaceByBranch(branchName: string): WorkspaceInfo | undefined {
+    const messageId = this.data.branchIndex[branchName];
+    return messageId ? this.data.workspaces[messageId] : undefined;
+  }
+
+  async addMrUrlIndex(mrUrl: string, messageId: string): Promise<void> {
+    this.data.mrUrlIndex[mrUrl] = messageId;
+    await this.save();
+    console.log(`[Storage] Added MR URL index: ${mrUrl} -> ${messageId}`);
+  }
+
+  async addBranchIndex(branchName: string, messageId: string): Promise<void> {
+    this.data.branchIndex[branchName] = messageId;
+    await this.save();
+    console.log(`[Storage] Added branch index: ${branchName} -> ${messageId}`);
+  }
+
+  isCommentProcessed(commentId: string): boolean {
+    return this.data.processedCommentIds.includes(commentId);
+  }
+
+  async markCommentProcessed(commentId: string): Promise<void> {
+    if (!this.data.processedCommentIds.includes(commentId)) {
+      this.data.processedCommentIds.push(commentId);
+      await this.save();
+    }
+  }
+
+  getWorkspacesInStatus(...statuses: WorkspaceStatus[]): WorkspaceInfo[] {
+    return Object.values(this.data.workspaces).filter(
+      w => statuses.includes(w.status)
+    );
   }
 }
