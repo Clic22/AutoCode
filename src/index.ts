@@ -738,7 +738,7 @@ ${testChecklist}`,
 
     // After MR creation, don't mark as completed yet - wait for feedback loop
     // The GitLabMonitor will handle the feedback loop and eventual completion
-    if (workspaceInfo.status === 'mr_created') {
+    if (workspaceInfo.status === 'mr_created' || workspaceInfo.status === 'awaiting_validation') {
       log('Waiting for feedback or validation on MR...');
       return;
     }
