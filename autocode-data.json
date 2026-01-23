@@ -3,7 +3,6 @@
     "1459891905541308551",
     "1450589010186731581",
     "1461304996598382770",
-    "1240301022472048801",
     "1463898325622456381"
   ],
   "lastScanTimestamp": 1769162237283,
@@ -57,21 +56,6 @@
       "mrUrl": "http://gitlab.totemmedia.com/Stephane/qtvghd/-/merge_requests/2514",
       "lastFeedbackAt": 1769092848864,
       "feedbackCount": 4
-    },
-    "1240301022472048801": {
-      "messageId": "1240301022472048801",
-      "workspacePath": "C:\\Work\\AutoCode\\workspaces\\1240301022472048801-31942457-ae49-4c3c-a841-670fc876a0a7",
-      "branchName": "feature/selection-window-does-not-scroll-the-screen",
-      "repoPath": "C:\\Work\\AutoCode\\workspaces\\1240301022472048801-31942457-ae49-4c3c-a841-670fc876a0a7\\repo",
-      "status": "failed",
-      "attempt": 1,
-      "createdAt": 1769073447182,
-      "updatedAt": 1769162440352,
-      "developmentPrompt": "## Development Prompt: Auto-Scroll During Multi-Card Selection Drag\n\n### Feature Summary\nImplement auto-scrolling functionality for the card collection view when performing a multi-card selection via drag. When the user drags a selection rectangle to the top or bottom edge of the visible viewport, the view should automatically scroll in that direction to allow selecting cards that are currently off-screen. This feature exists in the stable version (pre-2.0) but is not working in the Early Bird 2.0 build 1000.\n\n### Requirements\n1. When dragging a selection rectangle and the mouse cursor reaches the **bottom edge** of the visible card grid area, the view must automatically scroll downward to reveal more cards below\n2. When dragging a selection rectangle and the mouse cursor reaches the **top edge** of the visible card grid area, the view must automatically scroll upward to reveal more cards above\n3. The selection rectangle must continue to expand/update as the view scrolls, including newly visible cards in the selection area\n4. Scrolling should occur smoothly and at a reasonable speed (not too fast to control, not too slow to be frustrating)\n5. Scrolling should stop immediately when the mouse moves away from the edge zone or when the user releases the mouse button\n6. The feature should work consistently regardless of whether screen recording software is active (the stable version required \"mouse jiggling\" during recording, which should be fixed if possible)\n7. Auto-scroll should only activate when there is actually more content to scroll to in that direction\n\n### Technical Details\n- This is a **regression** from the stable version - the functionality existed before and needs to be restored/fixed in the 2.0 architecture\n- The issue is specifically in the **card collection view** where multi-card selection is performed\n- Consider implementing an \"edge detection zone\" (e.g., 20-50 pixels from the viewport edge) that triggers scrolling when the mouse enters during a drag operation\n- Use a timer-based approach for continuous scrolling while the mouse remains in the edge zone\n- The scroll speed could optionally accelerate the closer the mouse is to the absolute edge\n- Ensure proper cleanup of any timers/event handlers when the drag operation ends\n- The stable version's behavior of needing to \"jiggle the mouse\" during screen recording suggests there may have been a reliance on mouse move events to trigger scroll updates - consider using a timer-based polling approach instead to avoid this issue\n\n### Acceptance Criteria\n1. [ ] Start a multi-card selection drag in a collection with cards above the current view - dragging to the top edge scrolls the view upward\n2. [ ] Start a multi-card selection drag in a collection with cards below the current view - dragging to the bottom edge scrolls the view downward\n3. [ ] Cards that become visible due to auto-scrolling are properly included in the selection rectangle\n4. [ ] Scrolling stops immediately when the mouse button is released\n5. [ ] Scrolling stops when the mouse moves away from the edge zone back toward the center\n6. [ ] Scrolling does not occur when there is no more content in that direction\n7. [ ] The feature works consistently with or without screen recording software active\n8. [ ] No \"mouse jiggling\" is required to trigger or maintain the scroll\n9. [ ] Scroll speed is comfortable and controllable by the user\n\n### Files Likely to Modify\nBased on the MVVM architecture and feature description, investigate these areas:\n\n1. **View Layer** (primary - this is a UI interaction feature):\n   - `view/iStripperQmlWidgets/` - QML components for card grid/collection view\n   - Look for selection rectangle/rubber band implementation\n   - Look for the ScrollView or Flickable containing the card grid\n\n2. **ViewModel Layer**:\n   - `viewmodel/cardslist/` - Card list view models\n   - `viewmodel/collection/` - Collection view models\n   - May need to expose scroll control methods to QML\n\n3. **Src UI Layer**:\n   - `src/ui/` - Widget-based UI if the collection uses Qt Widgets\n   - `src/cards/CardList*` - Card list implementation files\n\n4. **Search for existing implementation**:\n   - Search for \"scroll\", \"selection\", \"rubber band\", \"drag\" in the codebase\n   - Look at the stable branch to see how the working implementation was done\n   - Check if there's a `SelectionArea`, `RubberBand`, or similar component",
-      "mrUrl": "http://gitlab.totemmedia.com/Stephane/qtvghd/-/merge_requests/2515",
-      "lastFeedbackAt": 1769162237911,
-      "feedbackCount": 4,
-      "lastError": "fatal: not a git repository: C:/Work/AutoCode/workspaces/base-repo/.git/worktrees/repo5\n"
     },
     "1463898325622456381": {
       "messageId": "1463898325622456381",
@@ -140,21 +124,16 @@
   },
   "mrUrlIndex": {
     "http://gitlab.totemmedia.com/Stephane/qtvghd/-/merge_requests/2514": "1429278063103049862",
-    "http://gitlab.totemmedia.com/Stephane/qtvghd/-/merge_requests/2515": "1240301022472048801",
     "http://gitlab.totemmedia.com/Stephane/qtvghd/-/merge_requests/2518": "1463898958303854867"
   },
   "branchIndex": {
     "feature/istripper-customization": "1429278063103049862",
-    "feature/selection-window-does-not-scroll-the-screen": "1240301022472048801",
     "fix/i-think-i-found-a-bug-i-put-in-my-options-the-dur": "1463898958303854867"
   },
   "processedCommentIds": [
     "2514-24397",
-    "2515-24400",
     "2514-24409",
     "2514-24413",
-    "2514-24417",
-    "2515-24421",
-    "2515-24441"
+    "2514-24417"
   ]
 }
