@@ -304,6 +304,86 @@ ${reviewResult.feedback}
     await fs.writeFile(filePath, content, 'utf-8');
   }
 
+  /**
+   * Generate a descriptive branch name based on the request content
+   */
+  async generateBranchName(
+    repoPath: string,
+    content: string
+  ): Promise<{ branchName: string; prefix: string } | null> {
+    const log = (msg: string) => console.log(`[Claude] ${msg}`);
+    log('Generating branch name...');
+
+    const prompt = this.buildBranchNamePrompt(content);
+    // Branch names are short (10-50 chars), so use a lower threshold than default
+    const result = await this.execute(repoPath, prompt, undefined, 0, 10);
+
+    if (!result.success) {
+      log('Failed to generate branch name with Claude');
+      return null;
+    }
+
+    // Parse the output
+    const output = result.output.trim();
+
+    // Look for the format: prefix/branch-name
+    const match = output.match(/^(fix|feature)\/([a-z0-9-]+)$/m);
+
+    if (match) {
+      return {
+        branchName: match[0], // Full branch name with prefix
+        prefix: match[1],
+      };
+    }
+
+    // Fallback: look for just the branch part
+    const branchMatch = output.match(/^([a-z0-9-]{3,50})$/m);
+    if (branchMatch) {
+      const contentLower = content.toLowerCase();
+      const isFix = contentLower.includes('bug') ||
+                    contentLower.includes('fix') ||
+                    contentLower.includes('crash') ||
+                    contentLower.includes('error');
+      const prefix = isFix ? 'fix' : 'feature';
+
+      return {
+        branchName: `${prefix}/${branchMatch[1]}`,
+        prefix,
+      };
+    }
+
+    log('Could not parse branch name from Claude output');
+    return null;
+  }
+
+  private buildBranchNamePrompt(content: string): string {
+    return `You are a git branch naming expert. Generate a concise, descriptive branch name based on the following request.
+
+## Request:
+${content}
+
+## Instructions:
+1. Analyze the request and determine if it's a bug fix or a new feature
+2. Generate a short, descriptive branch name (3-6 words maximum)
+3. Use only lowercase letters, numbers, and hyphens
+4. Make it descriptive but concise
+5. Output ONLY the branch name in the format: prefix/branch-name
+   - Use "fix/" prefix for bug fixes, error corrections, or problem resolutions
+   - Use "feature/" prefix for new features, enhancements, or additions
+
+## Examples:
+- "Add user authentication" → feature/user-authentication
+- "Fix crash on startup" → fix/startup-crash
+- "Implement dark mode" → feature/dark-mode
+- "Fix memory leak in parser" → fix/parser-memory-leak
+- "Add export to PDF functionality" → feature/export-pdf
+
+## Output Format:
+Output ONLY the branch name (prefix/branch-name), nothing else. No explanations, no additional text.
+
+Now generate the branch name:`;
+  }
+
   private buildInitialIdeationPrompt(userMessage: string): string {
     return `You are a senior software architect helping to understand a feature request.
 
@@ -596,7 +676,7 @@ Now review the implementation:`;
     return prompt;
   }
 
-  private async execute(repoPath: string, prompt: string, branchName?: string, retryCount: number = 0): Promise<ClaudeResult> {
+  private async execute(repoPath: string, prompt: string, branchName?: string, retryCount: number = 0, minOutputLength: number = 50): Promise<ClaudeResult> {
     const log = (msg: string) => console.log(branchName ? `[${branchName}] ${msg}` : `[Claude] ${msg}`);
     const MAX_RETRIES = 2;
 
@@ -669,8 +749,8 @@ Now review the implementation:`;
         // Check for "No messages returned" error in stderr
         const hasNoMessagesError = stderr.includes('No messages returned') || stderr.includes('Error: No messages returned');
 
-        // Check if output is empty or too short (less than 50 chars is suspicious)
-        const outputTooShort = stdout.trim().length < 50;
+        // Check if output is empty or too short (configurable threshold)
+        const outputTooShort = stdout.trim().length < minOutputLength;
 
         if (code === 0 && !hasNoMessagesError && !outputTooShort) {
           resolve({
@@ -694,7 +774,7 @@ Now review the implementation:`;
             log(`Waiting ${delay}ms before retry...`);
 
             setTimeout(async () => {
-              const retryResult = await this.execute(repoPath, prompt, branchName, retryCount + 1);
+              const retryResult = await this.execute(repoPath, prompt, branchName, retryCount + 1, minOutputLength);
               resolve(retryResult);
             }, delay);
           } else {

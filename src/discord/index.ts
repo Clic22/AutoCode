@@ -28,7 +28,7 @@ export interface CodeRequest {
 
 export interface DiscordBotEvents {
   onRequestApproved: (request: CodeRequest) => Promise<void>;
-  onIdeationStart?: (messageId: string, channelId: string, threadId: string, content: string, author: string) => Promise<void>;
+  onIdeationStart?: (messageId: string, channelId: string, threadId: string, content: string, author: string, existingMessages?: string[]) => Promise<void>;
   onIdeationResponse?: (messageId: string, threadId: string, response: string) => Promise<void>;
 }
 
@@ -521,6 +521,23 @@ export class DiscordBot {
         console.log(`[Discord] Found unprocessed thread: ${thread.name}`);
         console.log(`[Discord] Starting ideation for thread ${thread.id}...`);
 
+        // Fetch all existing messages in the thread
+        let existingMessages: string[] = [];
+        try {
+          const messages = await thread.messages.fetch({ limit: 100 });
+          existingMessages = messages
+            .filter((m) => !m.author.bot) // Exclude bot messages
+            .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
+            .map((m) => `${m.author.username}: ${m.content}`)
+            .filter((msg) => msg.trim());
+
+          if (existingMessages.length > 1) {
+            console.log(`[Discord] Found ${existingMessages.length} existing messages in thread`);
+          }
+        } catch (error) {
+          console.warn(`[Discord] Could not fetch thread messages:`, error);
+        }
+
         // Trigger ideation start event
         if (this.events.onIdeationStart) {
           await this.events.onIdeationStart(
@@ -528,7 +545,8 @@ export class DiscordBot {
             forum.id,
             thread.id,
             starterMessage.content,
-            username
+            username,
+            existingMessages.length > 0 ? existingMessages : undefined
           );
         }
       } catch (error) {

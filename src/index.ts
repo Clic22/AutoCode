@@ -166,7 +166,8 @@ class AutoCode {
     channelId: string,
     threadId: string,
     content: string,
-    author: string
+    author: string,
+    existingMessages?: string[]
   ): Promise<void> {
     console.log(`[AutoCode] Starting ideation for message ${messageId}`);
 
@@ -174,7 +175,7 @@ class AutoCode {
       // During ideation, we don't create a workspace yet
       // We just use the base repo for exploration (read-only)
       const baseRepoPath = this.gitManager.getBaseRepoPath();
-      const branchName = this.generateBranchName(content);
+      const branchName = await this.generateBranchName(content);
 
       // Track ideation state without creating workspace
       await this.storage.createWorkspace({
@@ -187,13 +188,63 @@ class AutoCode {
         threadId,
       });
 
+      // Initialize conversation with existing messages if available, otherwise just the initial message
+      const initialConversation = existingMessages && existingMessages.length > 0
+        ? existingMessages
+        : [`User: ${content}`];
+
+      if (existingMessages && existingMessages.length > 1) {
+        console.log(`[AutoCode] Resuming with ${existingMessages.length} existing messages from thread`);
+      }
+
       // Update status to in_progress
       await this.storage.updateWorkspaceStatus(messageId, 'ideation_in_progress', {
-        ideationConversation: [`User: ${content}`],
+        ideationConversation: initialConversation,
         lastIdeationTimestamp: Date.now(),
       });
 
-      // Start ideation - ask initial questions using base repo
+      // If we have existing messages, analyze the conversation to see if we're ready
+      // Otherwise, start fresh ideation
+      if (existingMessages && existingMessages.length > 1) {
+        console.log(`[AutoCode] Analyzing existing conversation...`);
+        const analysisResult = await this.claudeOrchestrator.continueIdeation(
+          baseRepoPath,
+          initialConversation
+        );
+
+        if (!analysisResult.needsMoreInfo) {
+          // We have enough info, move to approval
+          console.log(`[AutoCode] Existing conversation is sufficient, ready for approval`);
+
+          // Add summary to conversation
+          const conversation = initialConversation;
+          const summaryMessage = `Claude: ✅ Based on our conversation, I have enough information to proceed.\n\n**Summary:**\n${analysisResult.summary}`;
+          conversation.push(summaryMessage);
+
+          await this.storage.updateWorkspaceStatus(messageId, 'ideation_complete', {
+            ideationConversation: conversation,
+          });
+
+          await this.discord.postToThread(
+            threadId,
+            `${summaryMessage}\n\nReact with ✅ to approve and start implementation.`
+          );
+          return;
+        } else if (analysisResult.questions) {
+          // Need more info, ask additional questions
+          console.log(`[AutoCode] Need more information, asking follow-up questions...`);
+          await this.discord.postToThread(threadId, analysisResult.questions);
+
+          const conversation = initialConversation;
+          conversation.push(`Claude: ${analysisResult.questions}`);
+          await this.storage.updateWorkspaceStatus(messageId, 'ideation_in_progress', {
+            ideationConversation: conversation,
+          });
+          return;
+        }
+      }
+
+      // Start fresh ideation - ask initial questions using base repo
       console.log(`[AutoCode] Asking Claude for clarifying questions (using base repo)...`);
       const ideationResult = await this.claudeOrchestrator.startIdeation(baseRepoPath, content);
 
@@ -457,7 +508,7 @@ class AutoCode {
         console.log(`\n${getLogPrefix()} [Step 1] Creating workspace...`);
         workspace = await this.workspaceManager.create(request.id);
 
-        branchName = this.generateBranchName(request.content);
+        branchName = await this.generateBranchName(request.content);
         console.log(`\n[${branchName}] [Step 2] Creating worktree from base repository...`);
         repoPath = await this.gitManager.createWorktree(workspace, branchName);
 
@@ -972,8 +1023,23 @@ Do NOT repeat the same mistakes.
     }
   }
 
-  private generateBranchName(content: string): string {
-    // Determine if it's a fix or feature based on keywords
+  private async generateBranchName(content: string): Promise<string> {
+    // Use workspaces directory instead of base repo since we don't need repo access
+    const workspacesDir = this.config.workspacesDir;
+
+    // Try to use Claude to generate a descriptive branch name
+    try {
+      const result = await this.claudeOrchestrator.generateBranchName(workspacesDir, content);
+
+      if (result) {
+        console.log(`[AutoCode] Generated branch name: ${result.branchName}`);
+        return result.branchName;
+      }
+    } catch (error) {
+      console.log(`[AutoCode] Failed to generate branch name with Claude, falling back to simple method`);
+    }
+
+    // Fallback to original simple method if Claude fails
     const contentLower = content.toLowerCase();
     const isFix = contentLower.includes('bug') ||
                   contentLower.includes('fix') ||
