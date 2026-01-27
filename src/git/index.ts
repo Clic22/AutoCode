@@ -295,6 +295,71 @@ export class GitManager implements GitOperations {
   }
 
   /**
+   * Create a worktree from an existing remote branch
+   * Used to recover/sync workspaces across machines
+   */
+  async createWorktreeFromRemoteBranch(workspace: Workspace, branchName: string): Promise<string> {
+    const worktreePath = path.join(workspace.path, 'repo');
+
+    return this.baseRepoMutex.withLock(async () => {
+      // Cleanup any stale lock files from previous crashes
+      await this.cleanupLockFiles();
+
+      const git = simpleGit(this.baseRepoPath);
+
+      // Fetch latest to make sure we have the remote branch
+      console.log(`[Git] Fetching latest changes to find branch ${branchName}...`);
+      await git.fetch(['origin', '--prune']);
+
+      // Check if the branch exists on remote
+      const remoteBranches = await git.branch(['-r']);
+      const remoteBranchName = `origin/${branchName}`;
+      if (!remoteBranches.all.includes(remoteBranchName)) {
+        throw new Error(`Branch ${branchName} does not exist on remote`);
+      }
+
+      // Delete existing local branch if it exists (from a previous failed run)
+      await this.deleteBranchIfExists(git, branchName);
+
+      console.log(`[Git] Creating worktree at: ${worktreePath}`);
+      console.log(`[Git] Tracking remote branch: ${branchName}`);
+
+      // Create worktree with a local branch tracking the remote branch
+      // git worktree add <path> -b <local-branch> <remote-branch>
+      await git.raw([
+        'worktree',
+        'add',
+        worktreePath,
+        '-b',
+        branchName,
+        remoteBranchName,
+      ]);
+
+      console.log('[Git] Worktree created from remote branch');
+
+      // Initialize submodules in the worktree
+      console.log('[Git] Initializing submodules in worktree...');
+      const worktreeGit = simpleGit(worktreePath);
+      await worktreeGit.submoduleUpdate(['--init', '--recursive']);
+
+      console.log('[Git] Worktree ready with submodules');
+      return worktreePath;
+    });
+  }
+
+  /**
+   * Check if a branch exists on remote
+   */
+  async remoteBranchExists(branchName: string): Promise<boolean> {
+    return this.baseRepoMutex.withLock(async () => {
+      const git = simpleGit(this.baseRepoPath);
+      await git.fetch(['origin', '--prune']);
+      const remoteBranches = await git.branch(['-r']);
+      return remoteBranches.all.includes(`origin/${branchName}`);
+    });
+  }
+
+  /**
    * Clean up a worktree when done
    */
   async removeWorktree(workspace: Workspace): Promise<void> {

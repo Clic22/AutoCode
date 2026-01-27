@@ -90,13 +90,20 @@ class AutoCode {
     console.log('\n[AutoCode] Checking for incomplete workspaces to resume...');
     const allIncompleteWorkspaces = this.storage.getIncompleteWorkspaces();
 
-    // Filter out workspaces in ideation_complete status - they're waiting for user approval (emoji)
+    // Filter out workspaces that are waiting for external events, not processing
+    // - ideation_complete: waiting for approval emoji on Discord
+    // - ideation_in_progress: waiting for user response in Discord thread
+    // - awaiting_validation: waiting for feedback/approval comments on GitLab MR
     // Only resume workspaces that are actively being processed
-    const incompleteWorkspaces = allIncompleteWorkspaces.filter(ws => ws.status !== 'ideation_complete');
+    const waitingStatuses = ['ideation_complete', 'ideation_in_progress', 'awaiting_validation'];
+    const incompleteWorkspaces = allIncompleteWorkspaces.filter(ws => !waitingStatuses.includes(ws.status));
 
-    if (allIncompleteWorkspaces.length > incompleteWorkspaces.length) {
-      const waitingCount = allIncompleteWorkspaces.length - incompleteWorkspaces.length;
-      console.log(`[AutoCode] ${waitingCount} workspace(s) waiting for approval emoji (ideation_complete)`);
+    const waitingWorkspaces = allIncompleteWorkspaces.filter(ws => waitingStatuses.includes(ws.status));
+    if (waitingWorkspaces.length > 0) {
+      console.log(`[AutoCode] ${waitingWorkspaces.length} workspace(s) waiting for external events:`);
+      for (const ws of waitingWorkspaces) {
+        console.log(`  - ${ws.messageId}: ${ws.status}`);
+      }
     }
 
     if (incompleteWorkspaces.length > 0) {
@@ -435,10 +442,49 @@ class AutoCode {
           const repoExists = await this.directoryExists(workspaceInfo.repoPath);
 
           if (!workspaceExists || !repoExists) {
-            console.log(`${getLogPrefix()} Workspace directory missing, will recreate...`);
-            await this.storage.deleteWorkspace(request.id);
-            workspaceInfo = undefined;
-            branchName = '';
+            // Don't delete workspaces that are waiting for GitLab events - they don't need the physical directory
+            const gitlabWaitingStatuses = ['awaiting_validation', 'mr_created'];
+            if (gitlabWaitingStatuses.includes(workspaceInfo.status)) {
+              console.log(`${getLogPrefix()} Workspace directory missing but status is ${workspaceInfo.status}, keeping workspace record`);
+              // Just continue without the physical workspace - the GitLab monitor will handle it
+            } else if (workspaceInfo.branchName) {
+              // Try to recover workspace from remote branch (e.g., when syncing across machines)
+              console.log(`${getLogPrefix()} Workspace directory missing, trying to recover from remote branch...`);
+              try {
+                const remoteBranchExists = await this.gitManager.remoteBranchExists(workspaceInfo.branchName);
+                if (remoteBranchExists) {
+                  console.log(`${getLogPrefix()} Found branch on remote, recreating workspace...`);
+                  workspace = await this.workspaceManager.create(request.id);
+                  branchName = workspaceInfo.branchName;
+                  repoPath = await this.gitManager.createWorktreeFromRemoteBranch(workspace, branchName);
+
+                  // Update workspace info with new paths
+                  await this.storage.updateWorkspaceStatus(request.id, workspaceInfo.status, {
+                    workspacePath: workspace.path,
+                    repoPath: repoPath,
+                  });
+                  workspaceInfo.workspacePath = workspace.path;
+                  workspaceInfo.repoPath = repoPath;
+
+                  console.log(`${getLogPrefix()} Workspace recovered from remote branch`);
+                } else {
+                  console.log(`${getLogPrefix()} Branch not found on remote, will recreate from scratch...`);
+                  await this.storage.deleteWorkspace(request.id);
+                  workspaceInfo = undefined;
+                  branchName = '';
+                }
+              } catch (error) {
+                console.error(`${getLogPrefix()} Error recovering workspace:`, error);
+                await this.storage.deleteWorkspace(request.id);
+                workspaceInfo = undefined;
+                branchName = '';
+              }
+            } else {
+              console.log(`${getLogPrefix()} Workspace directory missing, will recreate...`);
+              await this.storage.deleteWorkspace(request.id);
+              workspaceInfo = undefined;
+              branchName = '';
+            }
           } else {
             workspace = {
               id: request.id,
@@ -524,6 +570,13 @@ class AutoCode {
     // Handle awaiting_validation status - do nothing, just waiting for approval
     if (initialStatus === 'awaiting_validation') {
       log('Waiting for validation approval from MR comments...');
+      return;
+    }
+
+    // Handle ideation_in_progress status - waiting for user response in Discord thread
+    if (initialStatus === 'ideation_in_progress') {
+      log('Ideation in progress - waiting for user response in Discord thread...');
+      // TODO: Could re-read thread to check for missed messages, but for now just wait
       return;
     }
 

@@ -174,7 +174,20 @@ export class Storage {
   }
 
   async deleteWorkspace(messageId: string): Promise<void> {
-    if (this.data.workspaces[messageId]) {
+    const workspace = this.data.workspaces[messageId];
+    if (workspace) {
+      // Clean up mrUrlIndex
+      if (workspace.mrUrl && this.data.mrUrlIndex[workspace.mrUrl] === messageId) {
+        delete this.data.mrUrlIndex[workspace.mrUrl];
+        console.log(`[Storage] Removed MR URL index for ${workspace.mrUrl}`);
+      }
+
+      // Clean up branchIndex
+      if (workspace.branchName && this.data.branchIndex[workspace.branchName] === messageId) {
+        delete this.data.branchIndex[workspace.branchName];
+        console.log(`[Storage] Removed branch index for ${workspace.branchName}`);
+      }
+
       delete this.data.workspaces[messageId];
       await this.save();
       console.log(`[Storage] Deleted workspace record for ${messageId}`);
