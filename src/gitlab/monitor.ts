@@ -1,5 +1,5 @@
 import { GitLabClient, MRComment } from './index';
-import { Storage, WorkspaceInfo } from '../storage';
+import { IStorage, WorkspaceInfo } from '../storage';
 
 export interface GitLabMonitorEvents {
   onFeedbackReceived: (feedback: FeedbackRequest) => Promise<void>;
@@ -17,7 +17,7 @@ export interface FeedbackRequest {
 
 export class GitLabMonitor {
   private gitlabClient: GitLabClient;
-  private storage: Storage;
+  private storage: IStorage;
   private events: GitLabMonitorEvents;
   private pollingInterval: number;
   private approvedUsers: string[];
@@ -27,7 +27,7 @@ export class GitLabMonitor {
 
   constructor(
     gitlabClient: GitLabClient,
-    storage: Storage,
+    storage: IStorage,
     events: GitLabMonitorEvents,
     pollingInterval: number = 60000,
     approvedUsers: string[] = []

@@ -13,7 +13,7 @@ import {
   Collection,
   ChannelType,
 } from 'discord.js';
-import { Storage } from '../storage';
+import { IStorage } from '../storage';
 
 export interface CodeRequest {
   id: string;
@@ -39,10 +39,10 @@ export class DiscordBot {
   private approvedUsers: string[];
   private privateChannelIds: string[];
   private events: DiscordBotEvents;
-  private storage: Storage;
+  private storage: IStorage;
   private sessionProcessed: Set<string> = new Set();
 
-  constructor(channelIds: string[], approvalEmoji: string, approvedUsers: string[], privateChannelIds: string[], events: DiscordBotEvents, storage: Storage) {
+  constructor(channelIds: string[], approvalEmoji: string, approvedUsers: string[], privateChannelIds: string[], events: DiscordBotEvents, storage: IStorage) {
     this.channelIds = channelIds;
     this.approvalEmoji = approvalEmoji;
     this.approvedUsers = approvedUsers;

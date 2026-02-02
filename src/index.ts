@@ -5,7 +5,7 @@ import { GitManager } from './git';
 import { GitLabClient } from './gitlab';
 import { GitLabMonitor, FeedbackRequest } from './gitlab/monitor';
 import { ClaudeOrchestrator } from './claude';
-import { Storage, WorkspaceInfo, WorkspaceStatus } from './storage';
+import { Storage, SupabaseStorage, IStorage, WorkspaceInfo, WorkspaceStatus } from './storage';
 import path from 'path';
 import fs from 'fs/promises';
 
@@ -19,11 +19,11 @@ class AutoCode {
   private gitlabClient: GitLabClient;
   private gitlabMonitor: GitLabMonitor;
   private claudeOrchestrator: ClaudeOrchestrator;
-  private storage: Storage;
+  private storage: IStorage;
   private activeRequests: number = 0;
   private requestQueue: CodeRequest[] = [];
 
-  constructor(config: Config, storage: Storage) {
+  constructor(config: Config, storage: IStorage) {
     this.config = config;
     this.storage = storage;
 
@@ -1141,9 +1141,16 @@ async function main(): Promise<void> {
 
   const config = loadConfig();
 
-  // Initialize storage
-  const storagePath = path.join(config.workspacesDir, '..', 'autocode-data.json');
-  const storage = new Storage(storagePath);
+  // Initialize storage based on configuration
+  let storage: IStorage;
+  if (config.storageType === 'supabase' && config.supabase) {
+    console.log('[AutoCode] Using Supabase storage');
+    storage = new SupabaseStorage(config.supabase);
+  } else {
+    console.log('[AutoCode] Using JSON file storage');
+    const storagePath = path.join(config.workspacesDir, '..', 'autocode-data.json');
+    storage = new Storage(storagePath);
+  }
   await storage.load();
 
   const autocode = new AutoCode(config, storage);

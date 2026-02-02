@@ -20,6 +20,12 @@ export interface Config {
   };
   workspacesDir: string;
   claudeCliPath: string;
+  storageType: 'json' | 'supabase';
+  supabase?: {
+    url: string;
+    serviceRoleKey: string;
+    machineId?: string;
+  };
 }
 
 function getEnvOrThrow(key: string): string {
@@ -43,6 +49,26 @@ export function loadConfig(): Config {
   const privateChannelIdsRaw = process.env.PRIVATE_CHANNEL_IDS || '';
   const privateChannelIds = privateChannelIdsRaw.split(',').map(id => id.trim()).filter(id => id.length > 0);
 
+  // Determine storage type
+  const storageType = (process.env.STORAGE_TYPE as 'json' | 'supabase') || 'json';
+
+  // Supabase configuration (optional, required if storageType is 'supabase')
+  let supabase: Config['supabase'] = undefined;
+  if (storageType === 'supabase') {
+    const supabaseUrl = process.env.SUPABASE_URL;
+    const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    if (!supabaseUrl || !supabaseServiceRoleKey) {
+      throw new Error('SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required when STORAGE_TYPE=supabase');
+    }
+
+    supabase = {
+      url: supabaseUrl,
+      serviceRoleKey: supabaseServiceRoleKey,
+      machineId: process.env.MACHINE_ID || undefined,
+    };
+  }
+
   return {
     discord: {
       botToken: getEnvOrThrow('DISCORD_BOT_TOKEN'),
@@ -62,5 +88,7 @@ export function loadConfig(): Config {
     },
     workspacesDir: path.resolve(process.env.WORKSPACES_DIR || './workspaces'),
     claudeCliPath: process.env.CLAUDE_CLI_PATH || 'claude',
+    storageType,
+    supabase,
   };
 }

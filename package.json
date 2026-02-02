@@ -9,20 +9,26 @@
     "dev": "ts-node src/index.ts",
     "watch": "tsc -w"
   },
-  "keywords": ["discord", "claude", "automation", "code-generation"],
+  "keywords": [
+    "discord",
+    "claude",
+    "automation",
+    "code-generation"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "discord.js": "^14.14.1",
-    "simple-git": "^3.22.0",
+    "@supabase/supabase-js": "^2.93.3",
     "axios": "^1.6.5",
+    "discord.js": "^14.14.1",
     "dotenv": "^16.3.1",
+    "simple-git": "^3.22.0",
     "uuid": "^9.0.1"
   },
   "devDependencies": {
     "@types/node": "^20.11.5",
     "@types/uuid": "^9.0.7",
-    "typescript": "^5.3.3",
-    "ts-node": "^10.9.2"
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
   }
 }

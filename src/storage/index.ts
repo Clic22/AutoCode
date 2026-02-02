@@ -1,6 +1,38 @@
 import fs from 'fs/promises';
 import path from 'path';
 
+// Re-export SupabaseStorage
+export { SupabaseStorage } from './supabase';
+
+// Interface for storage implementations
+export interface IStorage {
+  load(): Promise<void>;
+  save(): Promise<void>;
+  isProcessed(messageId: string): boolean;
+  markProcessed(messageId: string): Promise<void>;
+  updateLastScan(): Promise<void>;
+  getLastScanTimestamp(): number;
+  getProcessedIds(): string[];
+  getWorkspace(messageId: string): WorkspaceInfo | undefined;
+  hasWorkspace(messageId: string): boolean;
+  createWorkspace(info: Omit<WorkspaceInfo, 'createdAt' | 'updatedAt'>): Promise<WorkspaceInfo>;
+  updateWorkspaceStatus(
+    messageId: string,
+    status: WorkspaceStatus,
+    extra?: Partial<Pick<WorkspaceInfo, 'developmentPrompt' | 'lastError' | 'mrUrl' | 'attempt' | 'lastFeedbackAt' | 'feedbackCount' | 'threadId' | 'ideationConversation' | 'lastIdeationTimestamp' | 'workspacePath' | 'repoPath'>>
+  ): Promise<void>;
+  deleteWorkspace(messageId: string): Promise<void>;
+  getIncompleteWorkspaces(): WorkspaceInfo[];
+  getAllWorkspaces(): WorkspaceInfo[];
+  getWorkspaceByMrUrl(mrUrl: string): WorkspaceInfo | undefined;
+  getWorkspaceByBranch(branchName: string): WorkspaceInfo | undefined;
+  addMrUrlIndex(mrUrl: string, messageId: string): Promise<void>;
+  addBranchIndex(branchName: string, messageId: string): Promise<void>;
+  isCommentProcessed(commentId: string): boolean;
+  markCommentProcessed(commentId: string): Promise<void>;
+  getWorkspacesInStatus(...statuses: WorkspaceStatus[]): WorkspaceInfo[];
+}
+
 export type WorkspaceStatus =
   | 'created'           // Workspace created, nothing done yet
   | 'ideation_pending'  // New message in private channel, ideation not started yet

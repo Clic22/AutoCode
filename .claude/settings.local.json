@@ -12,7 +12,24 @@
       "Bash(npm start)",
       "Bash(git worktree:*)",
       "Bash(test:*)",
-      "Bash(python -m json.tool:*)"
+      "Bash(python -m json.tool:*)",
+      "mcp__plugin_supabase_supabase__search_docs",
+      "mcp__plugin_supabase_supabase__list_organizations",
+      "mcp__plugin_supabase_supabase__get_cost",
+      "mcp__plugin_supabase_supabase__confirm_cost",
+      "mcp__plugin_supabase_supabase__create_project",
+      "mcp__plugin_supabase_supabase__apply_migration",
+      "mcp__plugin_supabase_supabase__get_project_url",
+      "mcp__plugin_supabase_supabase__get_publishable_keys",
+      "Bash(npm install:*)",
+      "Bash(if not exist \"C:\\\\Users\\\\aymme\\\\Documents\\\\repos\\\\autocode\\\\scripts\" mkdir \"C:\\\\Users\\\\aymme\\\\Documents\\\\repos\\\\autocode\\\\scripts\")",
+      "Bash(npx tsc --noEmit)",
+      "mcp__plugin_supabase_supabase__get_advisors",
+      "mcp__plugin_supabase_supabase__list_tables",
+      "mcp__plugin_supabase_supabase__generate_typescript_types",
+      "mcp__plugin_supabase_supabase__get_project",
+      "Bash(npx ts-node:*)",
+      "mcp__plugin_supabase_supabase__execute_sql"
     ]
   }
 }
