@@ -458,38 +458,52 @@ Now generate the branch name:`;
   private buildInitialIdeationPrompt(userMessage: string): string {
     return `You are a senior software architect helping to understand a feature request.
 
+## CRITICAL: READ-ONLY MODE
+**You are in IDEATION phase.** This means:
+- You MAY explore the codebase to understand the architecture and existing patterns
+- You MAY read files, search for code, and analyze the project structure
+- You MUST NOT modify, create, edit, or delete any files
+- You MUST NOT write any code or make any changes
+- Any attempt to modify files will be rejected
+
 ## Your Task
-The user has posted the following request. Your goal is to ask clarifying questions to better understand their needs BEFORE any implementation begins.
+The user has posted the following request. Your goal is to:
+1. **Explore the codebase** to understand the relevant parts of the architecture
+2. **Ask clarifying questions** based on what you discover in the code
+3. Better understand the user's needs BEFORE any implementation begins
 
 ## User's Request:
 ${userMessage}
 
 ## Instructions
-1. Read and understand what the user is asking for
-2. Think about what information you would need to implement this properly
-3. Ask 3-5 specific, targeted questions to clarify:
-   - Technical requirements (specific technologies, approaches, constraints)
+1. **FIRST: Explore the codebase** - Look at the project structure, find relevant files, understand the existing patterns
+2. **THEN: Formulate questions** based on both the request AND what you found in the code
+3. Ask 3-5 specific, targeted questions that reference the codebase when relevant:
+   - Technical requirements and how they fit with existing architecture
    - Expected behavior and edge cases
-   - User experience considerations
-   - Integration points with existing systems
-   - Any ambiguities in the request
+   - Integration points you discovered in the code
+   - Any ambiguities between the request and existing implementations
 
 ## Important Rules
-- Ask SPECIFIC questions, not generic ones
+- Explore the code to give CONTEXTUAL questions, not generic ones
+- Reference specific files, classes, or patterns you found when relevant
 - Focus on what you truly need to know to implement this correctly
 - Keep questions concise and easy to answer
 - Number your questions (1. 2. 3. etc.)
 - Do NOT implement anything yet
-- Do NOT write code
+- Do NOT write or modify any code
 
 ## Output Format
-Generate a numbered list of clarifying questions. Example:
+First, briefly summarize what you found while exploring the codebase (1-2 sentences).
+Then generate a numbered list of clarifying questions. Example:
 
-1. Should this feature work with the existing authentication system, or does it need a new login flow?
-2. What should happen if [edge case]?
-3. Are there any performance requirements or constraints?
+I explored the codebase and found that authentication is handled in \`src/auth/\` with a session-based approach.
 
-Now, ask your clarifying questions:`;
+1. Should this feature work with the existing session-based authentication in \`src/auth/SessionManager.ts\`, or does it need a new login flow?
+2. I noticed there's already a similar feature in \`src/features/X.ts\` - should I extend it or create something new?
+3. What should happen if [edge case based on code review]?
+
+Now, explore the codebase and ask your clarifying questions:`;
   }
 
   private buildIdeationAnalysisPrompt(conversation: string[]): string {
@@ -497,18 +511,27 @@ Now, ask your clarifying questions:`;
 
     return `You are a senior software architect analyzing a requirements gathering conversation.
 
+## CRITICAL: READ-ONLY MODE
+**You are in IDEATION phase.** This means:
+- You MAY explore the codebase to understand the architecture and existing patterns
+- You MAY read files, search for code, and analyze the project structure
+- You MUST NOT modify, create, edit, or delete any files
+- You MUST NOT write any code or make any changes
+- Any attempt to modify files will be rejected
+
 ## Conversation So Far:
 ${conversationText}
 
 ## Your Task
-Analyze the conversation and determine if you have enough information to create a detailed development prompt.
+1. **Explore the codebase** if you haven't already - understand relevant files and patterns
+2. Analyze the conversation and determine if you have enough information to create a detailed development prompt
 
 ## Decision Criteria
 You have ENOUGH information if:
 - The core functionality is clearly defined
-- Technical approach is understood
+- Technical approach is understood (based on both conversation AND code exploration)
 - Major edge cases are addressed
-- Integration points are clear
+- Integration points are clear (you've identified relevant files/modules)
 - You can write a specific, actionable development prompt
 
 You need MORE information if:
@@ -516,6 +539,7 @@ You need MORE information if:
 - Important edge cases are not addressed
 - Technical approach needs clarification
 - There are contradictions or uncertainties
+- You found something in the codebase that raises new questions
 
 ## Output Format
 You MUST output in this EXACT format:
@@ -524,15 +548,15 @@ You MUST output in this EXACT format:
 
 If READY:
 **SUMMARY:**
-[Write a brief 2-3 sentence summary of what will be implemented]
+[Write a brief 2-3 sentence summary of what will be implemented, referencing relevant files/modules you found]
 
 If NEED_MORE_INFO:
 **QUESTIONS:**
-1. [First clarifying question]
+1. [First clarifying question - reference code when relevant]
 2. [Second clarifying question]
 3. [etc.]
 
-Now analyze the conversation and make your decision:`;
+Now explore the codebase if needed, analyze the conversation, and make your decision:`;
   }
 
   private parseIdeationResult(output: string): IdeationResult {

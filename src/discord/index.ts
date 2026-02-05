@@ -235,17 +235,19 @@ export class DiscordBot {
         }
       }
 
-      // Standard flow: ideation complete -> ask for base branch -> implementation
+      // Standard flow: ideation complete -> implementation
+      // (NEW FLOW: base branch is selected at the beginning, not after ideation)
       if (this.storage.isProcessed(message.id) || this.sessionProcessed.has(message.id)) {
         console.log(`[Discord] Message ${message.id} already processed, skipping`);
         return;
       }
 
       // Check if this is a workspace in ideation_complete status
+      // In the new flow, baseBranch is already set (selected at the beginning)
       const workspace = this.storage.getWorkspace(message.id);
-      if (workspace && workspace.status === 'ideation_complete' && workspace.threadId && !workspace.baseBranch) {
+      if (workspace && workspace.status === 'ideation_complete' && workspace.threadId) {
         console.log(`[Discord] ✅ Ideation approval detected on message ${message.id} by ${username}`);
-        // Trigger ideation approved event to ask for base branch
+        // Trigger ideation approved event - goes directly to implementation
         if (this.events.onIdeationApproved) {
           await this.events.onIdeationApproved(message.id, workspace.threadId);
         }

@@ -82,13 +82,14 @@ class AutoCode {
     const allIncompleteWorkspaces = this.storage.getIncompleteWorkspaces();
 
     // Filter out workspaces that are waiting for external events, not processing
+    // - ideation_pending: transient status during ideation startup
     // - ideation_complete: waiting for approval emoji on Discord
     // - ideation_in_progress: waiting for user response in Discord thread
     // - awaiting_base_branch: waiting for user to select base branch
     // - awaiting_validation: waiting for feedback/approval in Discord thread
     // - mr_created: waiting for feedback/approval in Discord thread
     // Only resume workspaces that are actively being processed
-    const waitingStatuses = ['ideation_complete', 'ideation_in_progress', 'awaiting_base_branch', 'awaiting_validation', 'mr_created'];
+    const waitingStatuses = ['ideation_pending', 'ideation_complete', 'ideation_in_progress', 'awaiting_base_branch', 'awaiting_validation', 'mr_created'];
     const incompleteWorkspaces = allIncompleteWorkspaces.filter(ws => !waitingStatuses.includes(ws.status));
 
     const waitingWorkspaces = allIncompleteWorkspaces.filter(ws => waitingStatuses.includes(ws.status));
@@ -157,6 +158,9 @@ class AutoCode {
     console.log('[AutoCode] Feedback will be received via Discord threads (GitLab polling removed)');
   }
 
+  /**
+   * Handle ideation start - NEW FLOW: Ask for branch FIRST, then create workspace
+   */
   private async handleIdeationStart(
     messageId: string,
     channelId: string,
@@ -168,103 +172,45 @@ class AutoCode {
     console.log(`[AutoCode] Starting ideation for message ${messageId}`);
 
     try {
-      // During ideation, we don't create a workspace yet
-      // We just use the base repo for exploration (read-only)
-      const baseRepoPath = this.gitManager.getBaseRepoPath();
       const branchName = await this.generateBranchName(content);
 
-      // Track ideation state without creating workspace
+      // Create workspace tracking with status awaiting_base_branch
+      // Workspace will be created AFTER branch selection
       await this.storage.createWorkspace({
         messageId,
-        workspacePath: '', // Will be created when approved
+        workspacePath: '', // Will be created after branch selection
         branchName,
-        repoPath: '', // Will be created when approved
-        status: 'ideation_pending',
+        repoPath: '', // Will be created after branch selection
+        status: 'awaiting_base_branch',  // NEW: Ask for branch first
         attempt: 1,
         threadId,
+      });
+
+      // Save initial content for later (when ideation starts)
+      const initialConversation = existingMessages && existingMessages.length > 0
+        ? existingMessages
+        : [`User: ${content}`];
+
+      await this.storage.updateWorkspaceStatus(messageId, 'awaiting_base_branch', {
+        ideationConversation: initialConversation,
       });
 
       // Add thread to index for quick lookup during feedback
       await this.storage.addThreadIndex(threadId, messageId);
 
-      // Initialize conversation with existing messages if available, otherwise just the initial message
-      const initialConversation = existingMessages && existingMessages.length > 0
-        ? existingMessages
-        : [`User: ${content}`];
+      // Ask for base branch FIRST (moved from handleIdeationApproved)
+      const branchChoiceMessage = `🌿 **Choix de la branche de base**\n\n` +
+        `Avant de commencer l'analyse, sur quelle branche souhaitez-vous baser ce développement ?\n\n` +
+        `**Options disponibles :**\n` +
+        `1️⃣ \`release/preview\` - Release preview (défaut)\n` +
+        `2️⃣ \`release/stable\` - Release stable\n` +
+        `3️⃣ \`release/beta\` - Release beta\n` +
+        `4️⃣ Autre - Spécifiez une branche personnalisée\n\n` +
+        `_Répondez avec le numéro (1, 2, 3) ou tapez directement le nom de la branche._`;
 
-      if (existingMessages && existingMessages.length > 1) {
-        console.log(`[AutoCode] Resuming with ${existingMessages.length} existing messages from thread`);
-      }
+      await this.discord.postToThread(threadId, branchChoiceMessage);
+      console.log(`[AutoCode] Posted branch choice message to thread ${threadId}`);
 
-      // Update status to in_progress
-      await this.storage.updateWorkspaceStatus(messageId, 'ideation_in_progress', {
-        ideationConversation: initialConversation,
-        lastIdeationTimestamp: Date.now(),
-      });
-
-      // If we have existing messages, analyze the conversation to see if we're ready
-      // Otherwise, start fresh ideation
-      if (existingMessages && existingMessages.length > 1) {
-        console.log(`[AutoCode] Analyzing existing conversation...`);
-        const analysisResult = await this.claudeOrchestrator.continueIdeation(
-          baseRepoPath,
-          initialConversation
-        );
-
-        if (!analysisResult.needsMoreInfo) {
-          // We have enough info, move to approval
-          console.log(`[AutoCode] Existing conversation is sufficient, ready for approval`);
-
-          // Add summary to conversation
-          const conversation = initialConversation;
-          const summaryMessage = `Claude: ✅ Based on our conversation, I have enough information to proceed.\n\n**Summary:**\n${analysisResult.summary}`;
-          conversation.push(summaryMessage);
-
-          await this.storage.updateWorkspaceStatus(messageId, 'ideation_complete', {
-            ideationConversation: conversation,
-          });
-
-          await this.discord.postToThread(
-            threadId,
-            `${summaryMessage}\n\nReact with ✅ to approve and start implementation.`
-          );
-          return;
-        } else if (analysisResult.questions) {
-          // Need more info, ask additional questions
-          console.log(`[AutoCode] Need more information, asking follow-up questions...`);
-          await this.discord.postToThread(threadId, analysisResult.questions);
-
-          const conversation = initialConversation;
-          conversation.push(`Claude: ${analysisResult.questions}`);
-          await this.storage.updateWorkspaceStatus(messageId, 'ideation_in_progress', {
-            ideationConversation: conversation,
-          });
-          return;
-        }
-      }
-
-      // Start fresh ideation - ask initial questions using base repo
-      console.log(`[AutoCode] Asking Claude for clarifying questions (using base repo)...`);
-      const ideationResult = await this.claudeOrchestrator.startIdeation(baseRepoPath, content);
-
-      if (!ideationResult.success) {
-        throw new Error(`Ideation failed: ${ideationResult.error}`);
-      }
-
-      // Post Claude's questions to the thread
-      await this.discord.postToThread(threadId, ideationResult.output);
-
-      // Update conversation history
-      const workspace = this.storage.getWorkspace(messageId);
-      const conversation = workspace?.ideationConversation || [];
-      conversation.push(`Claude: ${ideationResult.output}`);
-
-      await this.storage.updateWorkspaceStatus(messageId, 'ideation_in_progress', {
-        ideationConversation: conversation,
-        lastIdeationTimestamp: Date.now(),
-      });
-
-      console.log(`[AutoCode] Posted questions to thread ${threadId}`);
     } catch (error) {
       console.error(`[AutoCode] Error starting ideation:`, error);
       const workspace = this.storage.getWorkspace(messageId);
@@ -295,11 +241,13 @@ class AutoCode {
         lastIdeationTimestamp: Date.now(),
       });
 
-      // Ask Claude to analyze the conversation using base repo
-      console.log(`[AutoCode] Analyzing conversation to determine if ready...`);
-      const baseRepoPath = this.gitManager.getBaseRepoPath();
+      // Use workspace.repoPath if available (new flow with early workspace creation)
+      // Otherwise fall back to base repo (legacy or edge case)
+      const repoPath = workspace.repoPath || this.gitManager.getBaseRepoPath();
+      console.log(`[AutoCode] Analyzing conversation using repo: ${repoPath}`);
+
       const analysisResult = await this.claudeOrchestrator.continueIdeation(
-        baseRepoPath,
+        repoPath,
         conversation
       );
 
@@ -417,6 +365,7 @@ class AutoCode {
 
   /**
    * Start ideation with source message tracking (for cross-channel flow)
+   * NEW FLOW: Ask for branch FIRST, then create workspace
    */
   private async handleIdeationStartWithSource(
     messageId: string,
@@ -431,18 +380,16 @@ class AutoCode {
     console.log(`[AutoCode] Starting ideation for message ${messageId}${sourceMessageId ? ` (from source ${sourceMessageId})` : ''}`);
 
     try {
-      // During ideation, we don't create a workspace yet
-      // We just use the base repo for exploration (read-only)
-      const baseRepoPath = this.gitManager.getBaseRepoPath();
       const branchName = await this.generateBranchName(content);
 
-      // Track ideation state without creating workspace
+      // Create workspace tracking with status awaiting_base_branch
+      // Workspace will be created AFTER branch selection
       await this.storage.createWorkspace({
         messageId,
-        workspacePath: '', // Will be created when approved
+        workspacePath: '', // Will be created after branch selection
         branchName,
-        repoPath: '', // Will be created when approved
-        status: 'ideation_pending',
+        repoPath: '', // Will be created after branch selection
+        status: 'awaiting_base_branch',  // NEW: Ask for branch first
         attempt: 1,
         threadId,
         sourceMessageId,
@@ -457,84 +404,28 @@ class AutoCode {
         await this.storage.addSourceMessageIndex(sourceMessageId, messageId);
       }
 
-      // Initialize conversation with existing messages if available, otherwise just the initial message
+      // Save initial content for later (when ideation starts)
       const initialConversation = existingMessages && existingMessages.length > 0
         ? existingMessages
         : [`User: ${content}`];
 
-      if (existingMessages && existingMessages.length > 1) {
-        console.log(`[AutoCode] Resuming with ${existingMessages.length} existing messages from thread`);
-      }
-
-      // Update status to in_progress
-      await this.storage.updateWorkspaceStatus(messageId, 'ideation_in_progress', {
+      await this.storage.updateWorkspaceStatus(messageId, 'awaiting_base_branch', {
         ideationConversation: initialConversation,
-        lastIdeationTimestamp: Date.now(),
       });
 
-      // If we have existing messages, analyze the conversation to see if we're ready
-      // Otherwise, start fresh ideation
-      if (existingMessages && existingMessages.length > 1) {
-        console.log(`[AutoCode] Analyzing existing conversation...`);
-        const analysisResult = await this.claudeOrchestrator.continueIdeation(
-          baseRepoPath,
-          initialConversation
-        );
+      // Ask for base branch FIRST (moved from handleIdeationApproved)
+      const branchChoiceMessage = `🌿 **Choix de la branche de base**\n\n` +
+        `Avant de commencer l'analyse, sur quelle branche souhaitez-vous baser ce développement ?\n\n` +
+        `**Options disponibles :**\n` +
+        `1️⃣ \`release/preview\` - Release preview (défaut)\n` +
+        `2️⃣ \`release/stable\` - Release stable\n` +
+        `3️⃣ \`release/beta\` - Release beta\n` +
+        `4️⃣ Autre - Spécifiez une branche personnalisée\n\n` +
+        `_Répondez avec le numéro (1, 2, 3) ou tapez directement le nom de la branche._`;
 
-        if (!analysisResult.needsMoreInfo) {
-          // We have enough info, move to approval
-          console.log(`[AutoCode] Existing conversation is sufficient, ready for approval`);
+      await this.discord.postToThread(threadId, branchChoiceMessage);
+      console.log(`[AutoCode] Posted branch choice message to thread ${threadId}`);
 
-          // Add summary to conversation
-          const conversation = initialConversation;
-          const summaryMessage = `Claude: ✅ Based on our conversation, I have enough information to proceed.\n\n**Summary:**\n${analysisResult.summary}`;
-          conversation.push(summaryMessage);
-
-          await this.storage.updateWorkspaceStatus(messageId, 'ideation_complete', {
-            ideationConversation: conversation,
-          });
-
-          await this.discord.postToThread(
-            threadId,
-            `${summaryMessage}\n\nReact with ✅ to approve and start implementation.`
-          );
-          return;
-        } else if (analysisResult.questions) {
-          // Need more info, ask additional questions
-          console.log(`[AutoCode] Need more information, asking follow-up questions...`);
-          await this.discord.postToThread(threadId, analysisResult.questions);
-
-          const conversation = initialConversation;
-          conversation.push(`Claude: ${analysisResult.questions}`);
-          await this.storage.updateWorkspaceStatus(messageId, 'ideation_in_progress', {
-            ideationConversation: conversation,
-          });
-          return;
-        }
-      }
-
-      // Start fresh ideation - ask initial questions using base repo
-      console.log(`[AutoCode] Asking Claude for clarifying questions (using base repo)...`);
-      const ideationResult = await this.claudeOrchestrator.startIdeation(baseRepoPath, content);
-
-      if (!ideationResult.success) {
-        throw new Error(`Ideation failed: ${ideationResult.error}`);
-      }
-
-      // Post Claude's questions to the thread
-      await this.discord.postToThread(threadId, ideationResult.output);
-
-      // Update conversation history
-      const workspace = this.storage.getWorkspace(messageId);
-      const conversation = workspace?.ideationConversation || [];
-      conversation.push(`Claude: ${ideationResult.output}`);
-
-      await this.storage.updateWorkspaceStatus(messageId, 'ideation_in_progress', {
-        ideationConversation: conversation,
-        lastIdeationTimestamp: Date.now(),
-      });
-
-      console.log(`[AutoCode] Posted questions to thread ${threadId}`);
     } catch (error) {
       console.error(`[AutoCode] Error starting ideation:`, error);
       const workspace = this.storage.getWorkspace(messageId);
@@ -659,10 +550,11 @@ class AutoCode {
   }
 
   /**
-   * Handle ideation approval - ask user which base branch to use
+   * Handle ideation approval - Branch already selected, proceed directly to implementation
+   * NEW FLOW: No longer asks for branch (already selected at the beginning)
    */
   private async handleIdeationApproved(messageId: string, threadId: string): Promise<void> {
-    console.log(`[AutoCode] Ideation approved for workspace ${messageId}, asking for base branch`);
+    console.log(`[AutoCode] Ideation approved for workspace ${messageId}`);
 
     const workspace = this.storage.getWorkspace(messageId);
     if (!workspace) {
@@ -670,26 +562,37 @@ class AutoCode {
       return;
     }
 
-    // Update status to awaiting_base_branch
-    await this.storage.updateWorkspaceStatus(messageId, 'awaiting_base_branch');
+    // Branch was already selected at the beginning, workspace already exists
+    // Just confirm and queue for processing
+    await this.discord.postToThread(threadId,
+      `✅ **Idéation approuvée !**\n\n` +
+      `Lancement de l'implémentation sur la branche \`${workspace.baseBranch || 'release/preview'}\`...`
+    );
 
-    // Send message asking for base branch choice
-    const branchChoiceMessage = `🌿 **Choix de la branche de base**\n\n` +
-      `Sur quelle branche souhaitez-vous baser ce développement ?\n\n` +
-      `**Options disponibles :**\n` +
-      `1️⃣ \`release/preview\` - Release preview (défaut)\n` +
-      `2️⃣ \`release/stable\` - Release stable\n` +
-      `3️⃣ \`release/beta\` - Release beta\n` +
-      `4️⃣ Autre - Spécifiez une branche personnalisée\n\n` +
-      `_Répondez avec le numéro (1, 2, 3) ou tapez directement le nom de la branche._`;
+    // Update status to ideation_complete (if not already)
+    await this.storage.updateWorkspaceStatus(messageId, 'ideation_complete');
 
-    await this.discord.postToThread(threadId, branchChoiceMessage);
+    // Create CodeRequest and queue for processing
+    const request: CodeRequest = {
+      id: messageId,
+      messageId: messageId,
+      channelId: '',
+      content: workspace.ideationConversation?.join('\n\n') || '',
+      author: '',
+      approvedBy: '',
+      timestamp: new Date(),
+    };
 
-    console.log(`[AutoCode] Posted branch choice message to thread ${threadId}`);
+    this.requestQueue.push(request);
+    console.log(`[AutoCode] Request ${messageId} added to queue after ideation approval`);
+
+    // Try to process
+    this.processNextRequests();
   }
 
   /**
    * Handle base branch response from user
+   * NEW FLOW: Create workspace and START ideation (not queue for implementation)
    */
   private async handleBaseBranchResponse(
     messageId: string,
@@ -711,33 +614,137 @@ class AutoCode {
       return;
     }
 
-    // Save the selected base branch
-    await this.storage.updateWorkspaceStatus(messageId, 'ideation_complete', {
-      baseBranch: baseBranch,
-    });
-
     // Confirm the choice
     await this.discord.postToThread(threadId,
       `✅ **Branche de base sélectionnée :** \`${baseBranch}\`\n\n` +
-      `Préparation du workspace et lancement de l'implémentation...`
+      `Création du workspace et analyse en cours...`
     );
 
-    // Create CodeRequest and queue for processing
-    const request: CodeRequest = {
-      id: messageId,
-      messageId: messageId,
-      channelId: '',
-      content: workspace.ideationConversation?.join('\n\n') || '',
-      author: author,
-      approvedBy: author,
-      timestamp: new Date(),
-    };
+    try {
+      // CREATE THE WORKSPACE NOW on the selected branch
+      const workspaceObj = await this.workspaceManager.create(messageId);
+      const repoPath = await this.gitManager.createWorktree(
+        workspaceObj,
+        workspace.branchName,
+        baseBranch  // Use selected base branch
+      );
 
-    this.requestQueue.push(request);
-    console.log(`[AutoCode] Request ${messageId} added to queue after base branch selection`);
+      // Update workspace with paths and baseBranch
+      await this.storage.updateWorkspaceStatus(messageId, 'ideation_pending', {
+        workspacePath: workspaceObj.path,
+        repoPath,
+        baseBranch,
+      });
 
-    // Try to process
-    this.processNextRequests();
+      console.log(`[AutoCode] Workspace created at ${workspaceObj.path} with repo at ${repoPath}`);
+
+      // Now start ideation with the real workspace path (for code exploration)
+      await this.startIdeationWithExploration(
+        messageId,
+        threadId,
+        repoPath,
+        workspace.ideationConversation || []
+      );
+
+    } catch (error) {
+      console.error(`[AutoCode] Error creating workspace:`, error);
+      await this.discord.postToThread(threadId, `❌ Erreur lors de la création du workspace: ${error}`);
+      await this.storage.updateWorkspaceStatus(messageId, 'failed', {
+        lastError: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  }
+
+  /**
+   * Start ideation with code exploration - uses the real workspace for exploration
+   */
+  private async startIdeationWithExploration(
+    messageId: string,
+    threadId: string,
+    repoPath: string,
+    existingMessages: string[]
+  ): Promise<void> {
+    console.log(`[AutoCode] Starting ideation with code exploration on ${repoPath}`);
+
+    try {
+      await this.storage.updateWorkspaceStatus(messageId, 'ideation_in_progress', {
+        ideationConversation: existingMessages,
+        lastIdeationTimestamp: Date.now(),
+      });
+
+      // If we have existing messages (from cross-channel flow), analyze them
+      if (existingMessages.length > 1) {
+        console.log(`[AutoCode] Analyzing existing conversation with ${existingMessages.length} messages...`);
+        const analysisResult = await this.claudeOrchestrator.continueIdeation(
+          repoPath,
+          existingMessages
+        );
+
+        if (!analysisResult.needsMoreInfo) {
+          // We have enough info, move to approval
+          console.log(`[AutoCode] Existing conversation is sufficient, ready for approval`);
+
+          const conversation = [...existingMessages];
+          const summaryMessage = `Claude: ✅ Based on our conversation, I have enough information to proceed.\n\n**Summary:**\n${analysisResult.summary}`;
+          conversation.push(summaryMessage);
+
+          await this.storage.updateWorkspaceStatus(messageId, 'ideation_complete', {
+            ideationConversation: conversation,
+          });
+
+          await this.discord.postToThread(
+            threadId,
+            `${summaryMessage}\n\nReact with ✅ to approve and start implementation.`
+          );
+          return;
+        } else if (analysisResult.questions) {
+          // Need more info, ask additional questions
+          console.log(`[AutoCode] Need more information, asking follow-up questions...`);
+          await this.discord.postToThread(threadId, analysisResult.questions);
+
+          const conversation = [...existingMessages];
+          conversation.push(`Claude: ${analysisResult.questions}`);
+          await this.storage.updateWorkspaceStatus(messageId, 'ideation_in_progress', {
+            ideationConversation: conversation,
+          });
+          return;
+        }
+      }
+
+      // Start fresh ideation - ask initial questions using the workspace repo (for code exploration)
+      console.log(`[AutoCode] Asking Claude for clarifying questions (with code exploration)...`);
+      const userMessage = existingMessages.length > 0
+        ? existingMessages[0].replace(/^User:\s*/, '')
+        : '';
+      const ideationResult = await this.claudeOrchestrator.startIdeation(repoPath, userMessage);
+
+      if (!ideationResult.success) {
+        throw new Error(`Ideation failed: ${ideationResult.error}`);
+      }
+
+      // Post Claude's questions to the thread
+      await this.discord.postToThread(threadId, ideationResult.output);
+
+      // Update conversation history
+      const conversation = [...existingMessages];
+      conversation.push(`Claude: ${ideationResult.output}`);
+
+      await this.storage.updateWorkspaceStatus(messageId, 'ideation_in_progress', {
+        ideationConversation: conversation,
+        lastIdeationTimestamp: Date.now(),
+      });
+
+      console.log(`[AutoCode] Posted questions to thread ${threadId}`);
+    } catch (error) {
+      console.error(`[AutoCode] Error during ideation with exploration:`, error);
+      await this.storage.updateWorkspaceStatus(messageId, 'failed', {
+        lastError: error instanceof Error ? error.message : 'Unknown error',
+      });
+
+      try {
+        await this.discord.postToThread(threadId, `❌ An error occurred during ideation: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      } catch {}
+    }
   }
 
   private processNextRequests(): void {
