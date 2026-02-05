@@ -31,6 +31,9 @@ export interface IStorage {
   isCommentProcessed(commentId: string): boolean;
   markCommentProcessed(commentId: string): Promise<void>;
   getWorkspacesInStatus(...statuses: WorkspaceStatus[]): WorkspaceInfo[];
+  // Cross-channel deduplication
+  getWorkspaceBySourceMessage(sourceMessageId: string): WorkspaceInfo | undefined;
+  addSourceMessageIndex(sourceMessageId: string, messageId: string): Promise<void>;
 }
 
 export type WorkspaceStatus =
@@ -68,6 +71,9 @@ export interface WorkspaceInfo {
   threadId?: string;            // Discord thread ID for ideation conversation
   ideationConversation?: string[]; // Messages in ideation conversation
   lastIdeationTimestamp?: number; // Last ideation message timestamp
+  // Cross-channel tracking (public channel -> private channel thread)
+  sourceMessageId?: string;     // ID of the original message (from public channel)
+  sourceChannelId?: string;     // ID of the original channel (public channel)
   createdAt: number;
   updatedAt: number;
 }
@@ -79,6 +85,7 @@ export interface ProcessedData {
   mrUrlIndex: Record<string, string>;         // mrUrl -> messageId
   branchIndex: Record<string, string>;        // branchName -> messageId
   processedCommentIds: string[];              // GitLab comment IDs
+  sourceMessageIndex: Record<string, string>; // sourceMessageId -> messageId (for cross-channel deduplication)
 }
 
 export class Storage {
@@ -94,6 +101,7 @@ export class Storage {
       mrUrlIndex: {},
       branchIndex: {},
       processedCommentIds: [],
+      sourceMessageIndex: {},
     };
   }
 
@@ -108,6 +116,7 @@ export class Storage {
         mrUrlIndex: loaded.mrUrlIndex || {},
         branchIndex: loaded.branchIndex || {},
         processedCommentIds: loaded.processedCommentIds || [],
+        sourceMessageIndex: loaded.sourceMessageIndex || {},
       };
       console.log(`[Storage] Loaded ${this.data.processedMessageIds.length} processed message IDs`);
       console.log(`[Storage] Loaded ${Object.keys(this.data.workspaces).length} workspace records`);
@@ -121,6 +130,7 @@ export class Storage {
         mrUrlIndex: {},
         branchIndex: {},
         processedCommentIds: [],
+        sourceMessageIndex: {},
       };
     }
   }
@@ -220,6 +230,12 @@ export class Storage {
         console.log(`[Storage] Removed branch index for ${workspace.branchName}`);
       }
 
+      // Clean up sourceMessageIndex
+      if (workspace.sourceMessageId && this.data.sourceMessageIndex[workspace.sourceMessageId] === messageId) {
+        delete this.data.sourceMessageIndex[workspace.sourceMessageId];
+        console.log(`[Storage] Removed source message index for ${workspace.sourceMessageId}`);
+      }
+
       delete this.data.workspaces[messageId];
       await this.save();
       console.log(`[Storage] Deleted workspace record for ${messageId}`);
@@ -275,5 +291,19 @@ export class Storage {
     return Object.values(this.data.workspaces).filter(
       w => statuses.includes(w.status)
     );
+  }
+
+  // Cross-channel deduplication methods
+
+  getWorkspaceBySourceMessage(sourceMessageId: string): WorkspaceInfo | undefined {
+    const messageId = this.data.sourceMessageIndex[sourceMessageId];
+    if (!messageId) return undefined;
+    return this.data.workspaces[messageId];
+  }
+
+  async addSourceMessageIndex(sourceMessageId: string, messageId: string): Promise<void> {
+    this.data.sourceMessageIndex[sourceMessageId] = messageId;
+    await this.save();
+    console.log(`[Storage] Added source message index: ${sourceMessageId} -> ${messageId}`);
   }
 }

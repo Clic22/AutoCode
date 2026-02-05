@@ -1,4 +1,4 @@
-import { createClient, SupabaseClient, RealtimeChannel } from '@supabase/supabase-js';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import os from 'os';
 import { WorkspaceStatus, WorkspaceInfo, ProcessedData } from './index';
 
@@ -22,6 +22,8 @@ interface WorkspaceRow {
   thread_id: string | null;
   ideation_conversation: string[] | null;
   last_ideation_timestamp: number | null;
+  source_message_id: string | null;
+  source_channel_id: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -37,7 +39,6 @@ export class SupabaseStorage {
   private client: SupabaseClient;
   private machineId: string;
   private cache: ProcessedData;
-  private realtimeChannel: RealtimeChannel | null = null;
   private initialized = false;
 
   constructor(config: SupabaseConfig) {
@@ -50,6 +51,7 @@ export class SupabaseStorage {
       mrUrlIndex: {},
       branchIndex: {},
       processedCommentIds: [],
+      sourceMessageIndex: {},
     };
   }
 
@@ -117,6 +119,9 @@ export class SupabaseStorage {
           if (ws.branch_name) {
             this.cache.branchIndex[ws.branch_name] = ws.message_id;
           }
+          if (ws.source_message_id) {
+            this.cache.sourceMessageIndex[ws.source_message_id] = ws.message_id;
+          }
         }
       }
 
@@ -128,7 +133,7 @@ export class SupabaseStorage {
       if (processedMessagesError) {
         console.error('[SupabaseStorage] Error loading processed messages:', processedMessagesError);
       } else if (processedMessages) {
-        this.cache.processedMessageIds = processedMessages.map(pm => pm.message_id);
+        this.cache.processedMessageIds = processedMessages.map((pm: { message_id: string }) => pm.message_id);
       }
 
       // Load processed comments
@@ -139,7 +144,7 @@ export class SupabaseStorage {
       if (processedCommentsError) {
         console.error('[SupabaseStorage] Error loading processed comments:', processedCommentsError);
       } else if (processedComments) {
-        this.cache.processedCommentIds = processedComments.map(pc => pc.comment_id);
+        this.cache.processedCommentIds = processedComments.map((pc: { comment_id: string }) => pc.comment_id);
       }
 
       // Load app state for this machine
@@ -159,88 +164,9 @@ export class SupabaseStorage {
       console.log(`[SupabaseStorage] Loaded ${this.cache.processedMessageIds.length} processed message IDs`);
       console.log(`[SupabaseStorage] Loaded ${Object.keys(this.cache.workspaces).length} workspace records`);
 
-      // Setup realtime subscription
-      await this.setupRealtimeSubscription();
-
     } catch (error) {
       console.error('[SupabaseStorage] Error during load:', error);
       throw error;
-    }
-  }
-
-  private async setupRealtimeSubscription(): Promise<void> {
-    this.realtimeChannel = this.client
-      .channel('autocode-changes')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'workspaces' },
-        (payload) => this.handleWorkspaceChange(payload)
-      )
-      .on(
-        'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'processed_messages' },
-        (payload) => this.handleProcessedMessageInsert(payload)
-      )
-      .on(
-        'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'processed_comments' },
-        (payload) => this.handleProcessedCommentInsert(payload)
-      )
-      .subscribe((status) => {
-        console.log(`[SupabaseStorage] Realtime subscription status: ${status}`);
-      });
-  }
-
-  private async handleWorkspaceChange(payload: any): Promise<void> {
-    const { eventType, new: newRecord, old: oldRecord } = payload;
-    console.log(`[SupabaseStorage] Realtime: workspace ${eventType}`);
-
-    if (eventType === 'DELETE' && oldRecord) {
-      const messageId = oldRecord.message_id;
-      const workspace = this.cache.workspaces[messageId];
-      if (workspace) {
-        // Clean up indexes
-        if (workspace.mrUrl) {
-          delete this.cache.mrUrlIndex[workspace.mrUrl];
-        }
-        if (workspace.branchName) {
-          delete this.cache.branchIndex[workspace.branchName];
-        }
-        delete this.cache.workspaces[messageId];
-      }
-    } else if (newRecord) {
-      // Fetch local paths for this workspace on this machine
-      const { data: localPath } = await this.client
-        .from('workspace_local_paths')
-        .select('*')
-        .eq('message_id', newRecord.message_id)
-        .eq('machine_id', this.machineId)
-        .single();
-
-      const workspaceInfo = this.rowToWorkspaceInfo(newRecord, localPath);
-      this.cache.workspaces[newRecord.message_id] = workspaceInfo;
-
-      // Update indexes
-      if (newRecord.mr_url) {
-        this.cache.mrUrlIndex[newRecord.mr_url] = newRecord.message_id;
-      }
-      if (newRecord.branch_name) {
-        this.cache.branchIndex[newRecord.branch_name] = newRecord.message_id;
-      }
-    }
-  }
-
-  private handleProcessedMessageInsert(payload: any): void {
-    const { new: newRecord } = payload;
-    if (newRecord && !this.cache.processedMessageIds.includes(newRecord.message_id)) {
-      this.cache.processedMessageIds.push(newRecord.message_id);
-    }
-  }
-
-  private handleProcessedCommentInsert(payload: any): void {
-    const { new: newRecord } = payload;
-    if (newRecord && !this.cache.processedCommentIds.includes(newRecord.comment_id)) {
-      this.cache.processedCommentIds.push(newRecord.comment_id);
     }
   }
 
@@ -260,6 +186,8 @@ export class SupabaseStorage {
       threadId: row.thread_id || undefined,
       ideationConversation: row.ideation_conversation || undefined,
       lastIdeationTimestamp: row.last_ideation_timestamp || undefined,
+      sourceMessageId: row.source_message_id || undefined,
+      sourceChannelId: row.source_channel_id || undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -344,6 +272,8 @@ export class SupabaseStorage {
         thread_id: info.threadId || null,
         ideation_conversation: info.ideationConversation || [],
         last_ideation_timestamp: info.lastIdeationTimestamp || null,
+        source_message_id: info.sourceMessageId || null,
+        source_channel_id: info.sourceChannelId || null,
         created_at: now,
         updated_at: now,
       });
@@ -502,6 +432,11 @@ export class SupabaseStorage {
       console.log(`[SupabaseStorage] Removed branch index for ${workspace.branchName}`);
     }
 
+    if (workspace.sourceMessageId && this.cache.sourceMessageIndex[workspace.sourceMessageId] === messageId) {
+      delete this.cache.sourceMessageIndex[workspace.sourceMessageId];
+      console.log(`[SupabaseStorage] Removed source message index for ${workspace.sourceMessageId}`);
+    }
+
     delete this.cache.workspaces[messageId];
     console.log(`[SupabaseStorage] Deleted workspace record for ${messageId}`);
   }
@@ -570,9 +505,20 @@ export class SupabaseStorage {
   }
 
   async disconnect(): Promise<void> {
-    if (this.realtimeChannel) {
-      await this.client.removeChannel(this.realtimeChannel);
-      this.realtimeChannel = null;
-    }
+    // No-op: realtime subscription removed (not needed for single-instance usage)
+  }
+
+  // Cross-channel deduplication methods
+
+  getWorkspaceBySourceMessage(sourceMessageId: string): WorkspaceInfo | undefined {
+    const messageId = this.cache.sourceMessageIndex[sourceMessageId];
+    if (!messageId) return undefined;
+    return this.cache.workspaces[messageId];
+  }
+
+  async addSourceMessageIndex(sourceMessageId: string, messageId: string): Promise<void> {
+    // The index is maintained in cache and via the source_message_id column in workspaces table
+    this.cache.sourceMessageIndex[sourceMessageId] = messageId;
+    console.log(`[SupabaseStorage] Added source message index: ${sourceMessageId} -> ${messageId}`);
   }
 }

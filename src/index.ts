@@ -52,6 +52,7 @@ class AutoCode {
         onRequestApproved: this.handleApprovedRequest.bind(this),
         onIdeationStart: this.handleIdeationStart.bind(this),
         onIdeationResponse: this.handleIdeationResponse.bind(this),
+        onPublicChannelApproval: this.handlePublicChannelApproval.bind(this),
       },
       storage
     );
@@ -345,6 +346,192 @@ class AutoCode {
       try {
         await this.discord.postToThread(threadId, `❌ An error occurred during ideation: ${error instanceof Error ? error.message : 'Unknown error'}`);
       } catch {}
+    }
+  }
+
+  /**
+   * Handle approval emoji on a message in a PUBLIC channel
+   * This creates a thread in the private channel for ideation
+   */
+  private async handlePublicChannelApproval(
+    sourceMessageId: string,
+    sourceChannelId: string,
+    content: string,
+    author: string,
+    threadMessages: string[],
+    approvedBy: string
+  ): Promise<void> {
+    console.log(`[AutoCode] Public channel approval for message ${sourceMessageId}`);
+    console.log(`[AutoCode] Content: ${content.substring(0, 200)}...`);
+
+    try {
+      // Double-check deduplication (in case processed between detection and handling)
+      const existingWorkspace = this.storage.getWorkspaceBySourceMessage(sourceMessageId);
+      if (existingWorkspace) {
+        console.log(`[AutoCode] Workspace already exists for source message ${sourceMessageId}, skipping`);
+        return;
+      }
+
+      // Create thread in private channel
+      console.log(`[AutoCode] Creating thread in private channel...`);
+      const { threadId, starterMessageId } = await this.discord.createThreadInPrivateChannel(
+        content,
+        author,
+        sourceChannelId,
+        threadMessages
+      );
+
+      console.log(`[AutoCode] Thread created: ${threadId}, starter message: ${starterMessageId}`);
+
+      // Mark source message as processed
+      await this.storage.markProcessed(sourceMessageId);
+
+      // Start ideation with source tracking
+      await this.handleIdeationStartWithSource(
+        starterMessageId,
+        this.config.discord.privateChannelIds[0],
+        threadId,
+        content,
+        author,
+        threadMessages.length > 0 ? threadMessages : undefined,
+        sourceMessageId,
+        sourceChannelId
+      );
+
+      // Add to source message index for deduplication
+      await this.storage.addSourceMessageIndex(sourceMessageId, starterMessageId);
+
+      console.log(`[AutoCode] Cross-channel ideation started for ${sourceMessageId} -> ${starterMessageId}`);
+    } catch (error) {
+      console.error(`[AutoCode] Error handling public channel approval:`, error);
+    }
+  }
+
+  /**
+   * Start ideation with source message tracking (for cross-channel flow)
+   */
+  private async handleIdeationStartWithSource(
+    messageId: string,
+    channelId: string,
+    threadId: string,
+    content: string,
+    author: string,
+    existingMessages?: string[],
+    sourceMessageId?: string,
+    sourceChannelId?: string
+  ): Promise<void> {
+    console.log(`[AutoCode] Starting ideation for message ${messageId}${sourceMessageId ? ` (from source ${sourceMessageId})` : ''}`);
+
+    try {
+      // During ideation, we don't create a workspace yet
+      // We just use the base repo for exploration (read-only)
+      const baseRepoPath = this.gitManager.getBaseRepoPath();
+      const branchName = await this.generateBranchName(content);
+
+      // Track ideation state without creating workspace
+      await this.storage.createWorkspace({
+        messageId,
+        workspacePath: '', // Will be created when approved
+        branchName,
+        repoPath: '', // Will be created when approved
+        status: 'ideation_pending',
+        attempt: 1,
+        threadId,
+        sourceMessageId,
+        sourceChannelId,
+      });
+
+      // If source message provided, add to index
+      if (sourceMessageId) {
+        await this.storage.addSourceMessageIndex(sourceMessageId, messageId);
+      }
+
+      // Initialize conversation with existing messages if available, otherwise just the initial message
+      const initialConversation = existingMessages && existingMessages.length > 0
+        ? existingMessages
+        : [`User: ${content}`];
+
+      if (existingMessages && existingMessages.length > 1) {
+        console.log(`[AutoCode] Resuming with ${existingMessages.length} existing messages from thread`);
+      }
+
+      // Update status to in_progress
+      await this.storage.updateWorkspaceStatus(messageId, 'ideation_in_progress', {
+        ideationConversation: initialConversation,
+        lastIdeationTimestamp: Date.now(),
+      });
+
+      // If we have existing messages, analyze the conversation to see if we're ready
+      // Otherwise, start fresh ideation
+      if (existingMessages && existingMessages.length > 1) {
+        console.log(`[AutoCode] Analyzing existing conversation...`);
+        const analysisResult = await this.claudeOrchestrator.continueIdeation(
+          baseRepoPath,
+          initialConversation
+        );
+
+        if (!analysisResult.needsMoreInfo) {
+          // We have enough info, move to approval
+          console.log(`[AutoCode] Existing conversation is sufficient, ready for approval`);
+
+          // Add summary to conversation
+          const conversation = initialConversation;
+          const summaryMessage = `Claude: ✅ Based on our conversation, I have enough information to proceed.\n\n**Summary:**\n${analysisResult.summary}`;
+          conversation.push(summaryMessage);
+
+          await this.storage.updateWorkspaceStatus(messageId, 'ideation_complete', {
+            ideationConversation: conversation,
+          });
+
+          await this.discord.postToThread(
+            threadId,
+            `${summaryMessage}\n\nReact with ✅ to approve and start implementation.`
+          );
+          return;
+        } else if (analysisResult.questions) {
+          // Need more info, ask additional questions
+          console.log(`[AutoCode] Need more information, asking follow-up questions...`);
+          await this.discord.postToThread(threadId, analysisResult.questions);
+
+          const conversation = initialConversation;
+          conversation.push(`Claude: ${analysisResult.questions}`);
+          await this.storage.updateWorkspaceStatus(messageId, 'ideation_in_progress', {
+            ideationConversation: conversation,
+          });
+          return;
+        }
+      }
+
+      // Start fresh ideation - ask initial questions using base repo
+      console.log(`[AutoCode] Asking Claude for clarifying questions (using base repo)...`);
+      const ideationResult = await this.claudeOrchestrator.startIdeation(baseRepoPath, content);
+
+      if (!ideationResult.success) {
+        throw new Error(`Ideation failed: ${ideationResult.error}`);
+      }
+
+      // Post Claude's questions to the thread
+      await this.discord.postToThread(threadId, ideationResult.output);
+
+      // Update conversation history
+      const workspace = this.storage.getWorkspace(messageId);
+      const conversation = workspace?.ideationConversation || [];
+      conversation.push(`Claude: ${ideationResult.output}`);
+
+      await this.storage.updateWorkspaceStatus(messageId, 'ideation_in_progress', {
+        ideationConversation: conversation,
+        lastIdeationTimestamp: Date.now(),
+      });
+
+      console.log(`[AutoCode] Posted questions to thread ${threadId}`);
+    } catch (error) {
+      console.error(`[AutoCode] Error starting ideation:`, error);
+      const workspace = this.storage.getWorkspace(messageId);
+      if (workspace) {
+        await this.storage.updateWorkspaceStatus(messageId, 'failed', {
+          lastError: error instanceof Error ? error.message : 'Unknown error',
+        });
+      }
     }
   }
 

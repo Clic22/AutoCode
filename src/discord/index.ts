@@ -30,6 +30,14 @@ export interface DiscordBotEvents {
   onRequestApproved: (request: CodeRequest) => Promise<void>;
   onIdeationStart?: (messageId: string, channelId: string, threadId: string, content: string, author: string, existingMessages?: string[]) => Promise<void>;
   onIdeationResponse?: (messageId: string, threadId: string, response: string) => Promise<void>;
+  onPublicChannelApproval?: (
+    sourceMessageId: string,
+    sourceChannelId: string,
+    content: string,
+    author: string,
+    threadMessages: string[],
+    approvedBy: string
+  ) => Promise<void>;
 }
 
 export class DiscordBot {
@@ -123,19 +131,22 @@ export class DiscordBot {
 
       // Check if the message is in one of the monitored channels (public or private) or in a thread of one
       const channel = message.channel;
-      let isInMonitoredChannel = this.channelIds.includes(message.channelId) || this.privateChannelIds.includes(message.channelId);
+      let isInPublicChannel = this.channelIds.includes(message.channelId);
+      let isInPrivateChannel = this.privateChannelIds.includes(message.channelId);
+      let parentChannelId: string | null = null;
 
       // If it's a thread, check if the parent is one of our monitored channels (public or private)
-      if (!isInMonitoredChannel && channel.isThread()) {
-        const parentId = channel.parentId || '';
-        isInMonitoredChannel = this.channelIds.includes(parentId) || this.privateChannelIds.includes(parentId);
+      if (!isInPublicChannel && !isInPrivateChannel && channel.isThread()) {
+        parentChannelId = channel.parentId || '';
+        isInPublicChannel = this.channelIds.includes(parentChannelId);
+        isInPrivateChannel = this.privateChannelIds.includes(parentChannelId);
       }
 
-      if (!isInMonitoredChannel) {
+      if (!isInPublicChannel && !isInPrivateChannel) {
         return;
       }
 
-      console.log(`[Discord] Reaction detected on message ${message.id} in monitored channel`);
+      console.log(`[Discord] Reaction detected on message ${message.id} in ${isInPublicChannel ? 'public' : 'private'} channel`);
 
       if (!this.isApprovalEmoji(reaction.emoji)) {
         console.log(`[Discord] Not approval emoji (expected: ${this.approvalEmoji}, got: ${reaction.emoji.name || reaction.emoji.toString()}), ignoring`);
@@ -155,6 +166,48 @@ export class DiscordBot {
         return;
       }
 
+      // Handle PUBLIC channel approval - create thread in private channel for ideation
+      // For public channels (text or forum), we start cross-channel ideation
+      // Exception: if it's a thread in a text channel that was created by the bot for ideation (private flow)
+      if (isInPublicChannel) {
+        // Check if already processed via source message index (deduplication)
+        const existingWorkspace = this.storage.getWorkspaceBySourceMessage(message.id);
+        if (existingWorkspace) {
+          console.log(`[Discord] Message ${message.id} already has a workspace (via source index), skipping`);
+          return;
+        }
+
+        if (this.storage.isProcessed(message.id) || this.sessionProcessed.has(message.id)) {
+          console.log(`[Discord] Message ${message.id} already processed, skipping`);
+          return;
+        }
+
+        this.sessionProcessed.add(message.id);
+        console.log(`[Discord] ✅ Public channel approval detected on message ${message.id} by ${username}`);
+
+        // Collect thread messages if any (for forum posts or text channel threads)
+        let threadMessages: string[] = [];
+        if (channel.isThread()) {
+          threadMessages = await this.collectForumThreadMessages(channel as ThreadChannel);
+        } else {
+          threadMessages = await this.collectThreadMessages(message as Message);
+        }
+
+        // Trigger public channel approval event
+        if (this.events.onPublicChannelApproval) {
+          await this.events.onPublicChannelApproval(
+            message.id,
+            parentChannelId || message.channelId, // Use parent for forums, channelId for text
+            message.content || '',
+            message.author?.username || 'unknown',
+            threadMessages,
+            username
+          );
+        }
+        return;
+      }
+
+      // Handle PRIVATE channel approval - standard flow (ideation complete -> implementation)
       if (this.storage.isProcessed(message.id) || this.sessionProcessed.has(message.id)) {
         console.log(`[Discord] Message ${message.id} already processed, skipping`);
         return;
@@ -322,6 +375,175 @@ export class DiscordBot {
     return thread;
   }
 
+  /**
+   * Collect messages from a thread attached to a message
+   */
+  private async collectThreadMessages(message: Message): Promise<string[]> {
+    let threadMessages: string[] = [];
+
+    if (message.hasThread && message.thread) {
+      try {
+        const thread = message.thread;
+        const messages = await thread.messages.fetch({ limit: 100 });
+        threadMessages = messages
+          .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
+          .map((m) => `${m.author.username}: ${m.content}`)
+          .filter((content) => content.trim());
+        console.log(`[Discord] Collected ${threadMessages.length} thread messages`);
+      } catch (error) {
+        console.error('[Discord] Error fetching thread messages:', error);
+      }
+    }
+
+    return threadMessages;
+  }
+
+  /**
+   * Create a thread in the first private channel for cross-channel ideation
+   * threadMessages should contain ALL messages from the source thread (including the first one)
+   */
+  async createThreadInPrivateChannel(
+    sourceContent: string,
+    sourceAuthor: string,
+    sourceChannelId: string,
+    threadMessages: string[]
+  ): Promise<{ threadId: string; starterMessageId: string }> {
+    if (this.privateChannelIds.length === 0) {
+      throw new Error('No private channels configured');
+    }
+
+    const privateChannelId = this.privateChannelIds[0];
+    console.log(`[Discord] Creating thread in private channel ${privateChannelId}`);
+
+    const channel = await this.client.channels.fetch(privateChannelId);
+    if (!channel) {
+      throw new Error(`Private channel ${privateChannelId} not found`);
+    }
+
+    // Build the starter message
+    let starterContent = `📥 **Imported from public channel**\n\n`;
+
+    // If we have thread messages, the first one is the original request
+    // Otherwise fall back to just the source content
+    if (threadMessages.length > 0) {
+      starterContent += `📝 **Original request:**\n\n${threadMessages[0]}`;
+    } else {
+      starterContent += `📝 **Original request by ${sourceAuthor}:**\n${sourceContent}`;
+    }
+
+    // Truncate starter if too long
+    if (starterContent.length > 1900) {
+      starterContent = starterContent.substring(0, 1897) + '...';
+    }
+
+    // Create thread name from source content
+    const threadName = `💭 ${sourceContent.substring(0, 80)}${sourceContent.length > 80 ? '...' : ''}`;
+
+    let threadId: string;
+    let starterMessageId: string;
+    let thread: ThreadChannel;
+
+    // Handle Forum Channel (type 15)
+    if (channel.type === ChannelType.GuildForum) {
+      const forum = channel as ForumChannel;
+      const createdThread = await forum.threads.create({
+        name: threadName,
+        message: {
+          content: starterContent,
+        },
+        autoArchiveDuration: 1440, // 24 hours
+      });
+      thread = createdThread;
+      threadId = createdThread.id;
+
+      // Fetch starter message
+      const starterMessage = await createdThread.fetchStarterMessage();
+      starterMessageId = starterMessage?.id || createdThread.id;
+
+      console.log(`[Discord] Created forum thread: ${threadId}`);
+    }
+    // Handle Text Channel (type 0)
+    else if (channel instanceof TextChannel) {
+      // Post a message first, then create a thread from it
+      const message = await channel.send(starterContent);
+      const createdThread = await message.startThread({
+        name: threadName,
+        autoArchiveDuration: 1440,
+      });
+      thread = createdThread;
+      threadId = createdThread.id;
+      starterMessageId = message.id;
+
+      console.log(`[Discord] Created text channel thread: ${threadId}`);
+    } else {
+      throw new Error(`Unsupported channel type for private channel ${privateChannelId}`);
+    }
+
+    // Post the discussion/responses (skip first message, it's already in the starter)
+    const responses = threadMessages.slice(1);
+    if (responses.length > 0) {
+      // Start with a header for the responses
+      let currentMessage = `💬 **Discussion / Additional context (${responses.length} message(s)):**\n\n`;
+
+      for (const msg of responses) {
+        const separator = '\n\n---\n\n';
+        const potentialMessage = currentMessage + separator + msg;
+
+        if (potentialMessage.length > 1900) {
+          // Post current message and start a new one
+          if (currentMessage) {
+            await thread.send(currentMessage);
+          }
+          // If single message is too long, split it
+          if (msg.length > 1900) {
+            const chunks = this.splitMessage(msg, 1900);
+            for (const chunk of chunks) {
+              await thread.send(chunk);
+            }
+            currentMessage = '';
+          } else {
+            currentMessage = msg;
+          }
+        } else {
+          currentMessage = potentialMessage;
+        }
+      }
+      // Post remaining content
+      if (currentMessage) {
+        await thread.send(currentMessage);
+      }
+    }
+
+    return { threadId, starterMessageId };
+  }
+
+  /**
+   * Split a long message into chunks
+   */
+  private splitMessage(message: string, maxLength: number): string[] {
+    const chunks: string[] = [];
+    let remaining = message;
+    while (remaining.length > 0) {
+      if (remaining.length <= maxLength) {
+        chunks.push(remaining);
+        break;
+      }
+      // Try to split at a newline
+      let splitIndex = remaining.lastIndexOf('\n', maxLength);
+      if (splitIndex === -1 || splitIndex < maxLength / 2) {
+        // No good newline, split at space
+        splitIndex = remaining.lastIndexOf(' ', maxLength);
+      }
+      if (splitIndex === -1 || splitIndex < maxLength / 2) {
+        // No good space, hard split
+        splitIndex = maxLength;
+      }
+      chunks.push(remaining.substring(0, splitIndex));
+      remaining = remaining.substring(splitIndex).trim();
+    }
+    return chunks;
+  }
+
   async postToThread(threadId: string, content: string): Promise<void> {
     try {
       const thread = await this.client.channels.fetch(threadId) as ThreadChannel;
@@ -404,10 +626,10 @@ export class DiscordBot {
 
     const allApprovedRequests: CodeRequest[] = [];
 
-    // Scan regular (public) emoji-based approval channels
+    // Scan PUBLIC channels - these now trigger cross-channel ideation
     for (const channelId of this.channelIds) {
       try {
-        console.log(`[Discord] Scanning channel: ${channelId} (public, emoji-based)`);
+        console.log(`[Discord] Scanning channel: ${channelId} (public, cross-channel ideation)`);
         const channel = await this.client.channels.fetch(channelId);
 
         if (!channel) {
@@ -417,26 +639,22 @@ export class DiscordBot {
 
         console.log(`[Discord] Channel ${channelId} type: ${channel.type}`);
 
-        let requests: CodeRequest[] = [];
-
         // Handle Forum Channel (type 15)
         if (channel.type === ChannelType.GuildForum) {
-          requests = await this.scanForumChannel(channel as ForumChannel);
+          await this.scanPublicForumForApproval(channel as ForumChannel);
         }
         // Handle Text Channel (type 0)
         else if (channel instanceof TextChannel) {
-          requests = await this.scanTextChannel(channel);
+          await this.scanPublicTextChannelForApproval(channel);
         } else {
           console.error(`[Discord] Unsupported channel type for ${channelId}:`, channel.type);
         }
-
-        allApprovedRequests.push(...requests);
       } catch (error) {
         console.error(`[Discord] Error scanning channel ${channelId}:`, error);
       }
     }
 
-    // Scan private channels (with ideation phase)
+    // Scan PRIVATE channels (with ideation phase)
     // Check for threads that need ideation started or completed requests
     for (const channelId of this.privateChannelIds) {
       try {
@@ -474,6 +692,199 @@ export class DiscordBot {
     allApprovedRequests.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
     console.log(`[Discord] Total scan complete. Found ${allApprovedRequests.length} approved requests across all channels.`);
     return allApprovedRequests;
+  }
+
+  /**
+   * Scan a public forum channel for approved messages that need cross-channel ideation
+   */
+  private async scanPublicForumForApproval(forum: ForumChannel): Promise<void> {
+    console.log(`[Discord] Scanning public forum for approved threads...`);
+
+    const allThreads: ThreadChannel[] = [];
+
+    // Fetch active threads
+    const activeThreads = await forum.threads.fetchActive();
+    allThreads.push(...Array.from(activeThreads.threads.values()));
+
+    // Fetch archived threads
+    const archivedThreads = await forum.threads.fetchArchived({ limit: 100 });
+    allThreads.push(...Array.from(archivedThreads.threads.values()));
+
+    console.log(`[Discord] Found ${allThreads.length} total threads to check in public forum`);
+
+    for (const thread of allThreads) {
+      try {
+        const starterMessage = await thread.fetchStarterMessage();
+        if (!starterMessage) continue;
+
+        const messageId = starterMessage.id;
+
+        // Check deduplication via source message index
+        const existingWorkspace = this.storage.getWorkspaceBySourceMessage(messageId);
+        if (existingWorkspace) {
+          continue;
+        }
+
+        // Skip if already processed
+        if (this.storage.isProcessed(messageId) || this.sessionProcessed.has(messageId)) {
+          continue;
+        }
+
+        // Check for approval emoji
+        const reactions = starterMessage.reactions.cache;
+        for (const reaction of reactions.values()) {
+          if (this.isApprovalEmoji(reaction.emoji)) {
+            // Get who approved it
+            let approvedBy: string | null = null;
+            try {
+              const users = await reaction.users.fetch();
+              for (const reactionUser of users.values()) {
+                if (this.isApprovedUser(reactionUser.username)) {
+                  approvedBy = reactionUser.username;
+                  break;
+                }
+              }
+            } catch (error) {
+              console.error('[Discord] Error fetching reaction users:', error);
+            }
+
+            if (!approvedBy) continue;
+
+            console.log(`[Discord] Found approved public forum thread: ${thread.name} by ${approvedBy}`);
+            this.sessionProcessed.add(messageId);
+
+            // Collect thread messages
+            const threadMessages = await this.collectForumThreadMessages(thread);
+
+            // Trigger public channel approval event
+            if (this.events.onPublicChannelApproval) {
+              await this.events.onPublicChannelApproval(
+                messageId,
+                forum.id,
+                starterMessage.content || '',
+                starterMessage.author?.username || 'unknown',
+                threadMessages,
+                approvedBy
+              );
+            }
+            break;
+          }
+        }
+      } catch (error: unknown) {
+        if (error instanceof Error && 'code' in error && (error as { code: number }).code === 10008) {
+          console.log(`[Discord] Starter message for thread ${thread.id} was deleted, skipping`);
+          continue;
+        }
+        console.error(`[Discord] Error processing public forum thread ${thread.id}:`, error);
+      }
+    }
+  }
+
+  /**
+   * Scan a public text channel for approved messages that need cross-channel ideation
+   */
+  private async scanPublicTextChannelForApproval(channel: TextChannel): Promise<void> {
+    console.log(`[Discord] Scanning public text channel for approved messages...`);
+    let lastMessageId: string | undefined;
+    let totalScanned = 0;
+    const maxMessages = 500;
+
+    while (totalScanned < maxMessages) {
+      const options: { limit: number; before?: string } = { limit: 100 };
+      if (lastMessageId) {
+        options.before = lastMessageId;
+      }
+
+      const messages = await channel.messages.fetch(options);
+      if (messages.size === 0) {
+        break;
+      }
+
+      for (const message of messages.values()) {
+        // Check deduplication via source message index
+        const existingWorkspace = this.storage.getWorkspaceBySourceMessage(message.id);
+        if (existingWorkspace) {
+          continue;
+        }
+
+        // Skip if already processed
+        if (this.storage.isProcessed(message.id) || this.sessionProcessed.has(message.id)) {
+          continue;
+        }
+
+        // Check for approval emoji
+        const reactions = message.reactions.cache;
+        for (const reaction of reactions.values()) {
+          if (this.isApprovalEmoji(reaction.emoji)) {
+            // Get who approved it
+            let approvedBy: string | null = null;
+            try {
+              const users = await reaction.users.fetch();
+              for (const reactionUser of users.values()) {
+                if (this.isApprovedUser(reactionUser.username)) {
+                  approvedBy = reactionUser.username;
+                  break;
+                }
+              }
+            } catch (error) {
+              console.error('[Discord] Error fetching reaction users:', error);
+            }
+
+            if (!approvedBy) continue;
+
+            console.log(`[Discord] Found approved public message: ${message.id} by ${approvedBy}`);
+            this.sessionProcessed.add(message.id);
+
+            // Collect thread messages if any
+            const threadMessages = await this.collectThreadMessages(message);
+
+            // Trigger public channel approval event
+            if (this.events.onPublicChannelApproval) {
+              await this.events.onPublicChannelApproval(
+                message.id,
+                channel.id,
+                message.content || '',
+                message.author?.username || 'unknown',
+                threadMessages,
+                approvedBy
+              );
+            }
+            break;
+          }
+        }
+
+        lastMessageId = message.id;
+      }
+
+      totalScanned += messages.size;
+      console.log(`[Discord] Scanned ${totalScanned} messages in public text channel...`);
+    }
+  }
+
+  /**
+   * Collect ALL messages from a forum thread (including starter message)
+   * Returns formatted messages with author, timestamp and content
+   */
+  private async collectForumThreadMessages(thread: ThreadChannel): Promise<string[]> {
+    let threadMessages: string[] = [];
+    try {
+      const messages = await thread.messages.fetch({ limit: 100 });
+      threadMessages = messages
+        .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
+        .map((m) => {
+          const date = new Date(m.createdTimestamp).toLocaleString('fr-FR');
+          // Include attachments info if any
+          const attachments = m.attachments.size > 0
+            ? ` [${m.attachments.size} attachment(s)]`
+            : '';
+          return `**${m.author.username}** (${date})${attachments}:\n${m.content}`;
+        })
+        .filter((content) => content.trim());
+      console.log(`[Discord] Collected ${threadMessages.length} forum thread messages`);
+    } catch (error) {
+      console.error('[Discord] Error fetching forum thread messages:', error);
+    }
+    return threadMessages;
   }
 
   private async scanPrivateForumForIdeation(forum: ForumChannel): Promise<void> {
