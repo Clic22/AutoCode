@@ -577,6 +577,12 @@ class AutoCode {
       attempt: 1, // Reset attempt counter for new feedback cycle
     });
 
+    await this.notifyThread(feedback.messageId,
+      `💬 **Feedback reçu**\n\n` +
+      `Je prends en compte le retour de ${feedback.author}.\n` +
+      `Je vais implémenter les modifications et mettre à jour la MR.`
+    );
+
     // Create CodeRequest for re-processing
     const feedbackRequest: CodeRequest = {
       id: feedback.messageId,
@@ -904,6 +910,23 @@ class AutoCode {
         if (!skipImplementation) {
           await this.storage.updateWorkspaceStatus(request.id, 'implementation', { attempt });
 
+          if (attempt === 1) {
+            await this.notifyThread(request.id,
+              `🚀 **Début de l'implémentation**\n\n` +
+              `Je travaille sur votre demande. Cela peut prendre plusieurs minutes.\n\n` +
+              `**Prochaines étapes:**\n` +
+              `• Implémentation du code\n` +
+              `• Review QA automatique\n` +
+              `• Création de la Merge Request\n\n` +
+              `Je vous tiendrai informé de l'avancement.`
+            );
+          } else {
+            await this.notifyThread(request.id,
+              `🔄 **Nouvelle tentative** (${attempt}/${MAX_ATTEMPTS})\n\n` +
+              `La review précédente a trouvé des problèmes. Je corrige et réessaie...`
+            );
+          }
+
           log(`[Phase 2] Implementing feature (Attempt ${attempt}/${MAX_ATTEMPTS})...`);
           const implementationResult = await this.claudeOrchestrator.implementFeature(
             repoPath,
@@ -921,6 +944,11 @@ class AutoCode {
 
         // Phase 3: QA Review
         await this.storage.updateWorkspaceStatus(request.id, 'review');
+
+        await this.notifyThread(request.id,
+          `🔍 **Review QA en cours**\n\n` +
+          `L'implémentation est terminée. Vérification automatique de la qualité...`
+        );
 
         log(`[Phase 3] QA Review (Attempt ${attempt}/${MAX_ATTEMPTS})...`);
         const reviewResult = await this.claudeOrchestrator.reviewImplementation(repoPath, developmentPrompt, previousFeedback, branchName);
@@ -942,11 +970,20 @@ class AutoCode {
         await this.storage.updateWorkspaceStatus(request.id, 'review_failed', { attempt });
 
         if (attempt < MAX_ATTEMPTS) {
+          await this.notifyThread(request.id,
+            `⚠️ **Review échouée** (Tentative ${attempt}/${MAX_ATTEMPTS})\n\n` +
+            `${reviewResult.issues.length} problème(s) détecté(s). Préparation d'une nouvelle tentative...`
+          );
           log('Preparing retry with feedback...');
           previousFeedback = this.buildFeedbackForRetry(reviewResult);
           attempt++;
         } else {
           log('⚠️ Max attempts reached. Proceeding with last implementation.');
+          await this.notifyThread(request.id,
+            `⚠️ **Nombre maximum de tentatives atteint**\n\n` +
+            `Après ${MAX_ATTEMPTS} tentatives, certains problèmes peuvent subsister.\n` +
+            `Je continue avec l'implémentation actuelle. Merci de bien vérifier la MR.`
+          );
           break;
         }
       }
@@ -1022,6 +1059,16 @@ ${testChecklist}`,
       await this.storage.updateWorkspaceStatus(request.id, 'mr_created', { mrUrl: mrResult.webUrl });
       log(`[Step 6] MR created: ${mrResult.webUrl}`);
 
+      await this.notifyThread(request.id,
+        `✅ **Merge Request créée !**\n\n` +
+        `Votre implémentation est prête pour review.\n\n` +
+        `🔗 **Lien:** ${mrResult.webUrl}\n\n` +
+        `Vous pouvez maintenant:\n` +
+        `• Consulter les changements sur GitLab\n` +
+        `• Laisser des commentaires si modifications nécessaires\n` +
+        `• Approuver quand tout est bon`
+      );
+
       // Add MR to indexes for feedback loop
       await this.storage.addMrUrlIndex(mrResult.webUrl, request.id);
       await this.storage.addBranchIndex(branchName, request.id);
@@ -1044,6 +1091,20 @@ ${testChecklist}`,
     console.log('\n' + '='.repeat(60));
     log(`✅ COMPLETED - MR: ${mrUrl || 'N/A'}`);
     console.log('='.repeat(60));
+  }
+
+  private async notifyThread(messageId: string, message: string): Promise<void> {
+    const workspace = this.storage.getWorkspace(messageId);
+    if (!workspace?.threadId) {
+      return; // Pas de thread associé, skip silencieusement
+    }
+
+    try {
+      await this.discord.postToThread(workspace.threadId, message);
+    } catch (error) {
+      console.error(`[AutoCode] Failed to send Discord notification: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      // Ne pas faire échouer le workflow pour une erreur de notification
+    }
   }
 
   private async savePromptToFile(
