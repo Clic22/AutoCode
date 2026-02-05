@@ -286,6 +286,13 @@ export class SupabaseStorage {
       });
 
     if (workspaceError) {
+      // Handle duplicate key error (race condition - another process created it first)
+      if (workspaceError.code === '23505') {
+        console.log(`[SupabaseStorage] Workspace ${info.messageId} already exists (race condition), skipping creation`);
+        // Return null to signal that we didn't create a new workspace
+        // The caller should check for null and skip further processing
+        return null as any; // Type assertion to satisfy return type, caller must check for null
+      }
       console.error('[SupabaseStorage] Error creating workspace:', workspaceError);
       throw workspaceError;
     }

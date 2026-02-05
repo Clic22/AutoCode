@@ -84,6 +84,7 @@ export class GitLabClient {
       body.append('title', options.title);
       body.append('description', options.description);
       body.append('remove_source_branch', 'true');
+      body.append('squash', 'true');
 
       const response = await fetch(url, {
         method: 'POST',

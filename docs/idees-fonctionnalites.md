@@ -96,3 +96,25 @@
 - Meilleure compréhension de l'architecture avant de commencer l'implémentation
 
 ---
+
+## 9. Activer Squash Commit sur les MR GitLab
+
+**Statut:** ✅ Implémenté
+
+**Résumé:** Lors de la création d'une Merge Request sur GitLab, activer automatiquement l'option "squash commits" pour que tous les commits de la branche soient fusionnés en un seul commit lors du merge.
+
+**Prompt original:**
+> Quand on crée une MR sur GitLab, j'aimerais que l'option "squash commits" soit activée automatiquement. Comme ça, quand la MR est mergée, tous les commits intermédiaires (implémentation initiale, corrections après review, etc.) sont fusionnés en un seul commit propre sur la branche cible.
+
+**Détails techniques:**
+- Modifier l'appel API GitLab dans `src/gitlab/index.ts` lors de la création de MR
+- Ajouter le paramètre `squash=true` dans la requête POST `/projects/:id/merge_requests`
+- Optionnel : permettre de configurer le message de commit squash (utiliser le titre de la MR par défaut)
+
+**Bénéfices attendus:**
+- Historique Git plus propre sur les branches principales
+- Un seul commit par fonctionnalité au lieu de multiples commits intermédiaires
+- Facilite le revert si nécessaire (un seul commit à annuler)
+- Meilleure lisibilité du git log
+
+---

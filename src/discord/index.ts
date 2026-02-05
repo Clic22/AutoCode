@@ -266,48 +266,59 @@ export class DiscordBot {
   }
 
   private async handleThreadCreate(thread: ThreadChannel): Promise<void> {
+    const logPrefix = `[Discord][handleThreadCreate][${thread.id}]`;
     try {
       const parentChannelId = thread.parentId;
       if (!parentChannelId || !this.isPrivateChannel(parentChannelId)) {
         return;
       }
 
-      console.log(`[Discord] New thread created in private channel: ${thread.name}`);
+      console.log(`${logPrefix} 🆕 New thread created in private channel: ${thread.name}`);
 
       // Fetch the starter message
       const starterMessage = await thread.fetchStarterMessage();
       if (!starterMessage) {
-        console.log(`[Discord] Could not fetch starter message for thread ${thread.id}`);
+        console.log(`${logPrefix} ❌ Could not fetch starter message`);
         return;
       }
 
+      console.log(`${logPrefix} Starter message ID: ${starterMessage.id}`);
+
       // Ignore bot threads
       if (starterMessage.author.bot) {
+        console.log(`${logPrefix} ⏭️ Ignoring bot thread`);
         return;
       }
 
       // Check if user is authorized
       const username = starterMessage.author.username || 'unknown';
       if (!this.isApprovedUser(username)) {
-        console.log(`[Discord] User ${username} is not authorized for private channel, ignoring thread`);
+        console.log(`${logPrefix} ⏭️ User ${username} not authorized, ignoring`);
         return;
       }
 
       // Check if already processed or in ideation
-      if (this.storage.isProcessed(starterMessage.id) || this.sessionProcessed.has(starterMessage.id)) {
-        console.log(`[Discord] Thread starter message ${starterMessage.id} already processed`);
+      if (this.storage.isProcessed(starterMessage.id)) {
+        console.log(`${logPrefix} ⏭️ Already processed in storage`);
+        return;
+      }
+      if (this.sessionProcessed.has(starterMessage.id)) {
+        console.log(`${logPrefix} ⏭️ Already processed in session`);
         return;
       }
 
       // Check if this message already has a workspace
       const existingWorkspace = this.storage.getWorkspace(starterMessage.id);
       if (existingWorkspace) {
-        console.log(`[Discord] Thread ${thread.id} already has workspace in status: ${existingWorkspace.status}`);
+        console.log(`${logPrefix} ⏭️ Already has workspace (status: ${existingWorkspace.status})`);
         return;
       }
 
-      console.log(`[Discord] Starting ideation for thread: ${thread.name}`);
-      console.log(`[Discord] Starter message from: ${username}`);
+      // IMPORTANT: Add to sessionProcessed IMMEDIATELY to prevent race conditions
+      this.sessionProcessed.add(starterMessage.id);
+      console.log(`${logPrefix} ✅ Added to sessionProcessed`);
+
+      console.log(`${logPrefix} 📤 Calling onIdeationStart...`);
 
       // Trigger ideation start event
       if (this.events.onIdeationStart) {
@@ -319,12 +330,14 @@ export class DiscordBot {
           username
         );
       }
+      console.log(`${logPrefix} ✅ onIdeationStart completed`);
     } catch (error) {
-      console.error('[Discord] Error handling thread create:', error);
+      console.error(`${logPrefix} ❌ Error:`, error);
     }
   }
 
   private async handleNewMessage(message: Message): Promise<void> {
+    const logPrefix = `[Discord][handleNewMessage][${message.id}]`;
     try {
       // Ignore bot messages
       if (message.author.bot) {
@@ -345,42 +358,60 @@ export class DiscordBot {
         return;
       }
 
-      // Check if user is authorized
       const username = message.author.username || 'unknown';
+      console.log(`${logPrefix} 📨 New message in thread ${thread.id} from ${username}: "${message.content.substring(0, 50)}..."`);
+
+      // Check if user is authorized
       if (!this.isApprovedUser(username)) {
-        console.log(`[Discord] User ${username} is not authorized for private channel, ignoring message`);
+        console.log(`${logPrefix} ⏭️ User not authorized, ignoring`);
+        return;
+      }
+
+      // IMPORTANT: Ignore the starter message (it's the original request, not a response)
+      const starterMessage = await thread.fetchStarterMessage();
+      if (starterMessage && message.id === starterMessage.id) {
+        console.log(`${logPrefix} ⏭️ This is the starter message, ignoring`);
         return;
       }
 
       // Try to find workspace by thread index first (faster)
       let workspace = this.storage.getWorkspaceByThread(thread.id);
+      console.log(`${logPrefix} Workspace by thread: ${workspace ? `found (status: ${workspace.status})` : 'not found'}`);
 
       // If not found, fall back to fetching starter message (existing behavior)
-      if (!workspace) {
-        const starterMessage = await thread.fetchStarterMessage();
-        if (starterMessage) {
-          workspace = this.storage.getWorkspace(starterMessage.id);
-        }
+      if (!workspace && starterMessage) {
+        workspace = this.storage.getWorkspace(starterMessage.id);
+        console.log(`${logPrefix} Workspace by starterMessage: ${workspace ? `found (status: ${workspace.status})` : 'not found'}`);
       }
 
       if (!workspace) {
-        console.log(`[Discord] No workspace found for thread ${thread.id}`);
+        // No workspace yet - this might be a branch selection response
+        console.log(`${logPrefix} 🌿 No workspace found, routing to handleBaseBranchResponse...`);
+        if (starterMessage) {
+          await this.handleBaseBranchResponse(message, starterMessage.id, thread.id, username);
+        }
         return;
       }
 
       // Route based on workspace status
-      if (workspace.status.startsWith('ideation_')) {
-        // Ideation phase: handle as ideation response
+      console.log(`${logPrefix} 🔀 Routing based on workspace status: ${workspace.status}`);
+
+      if (workspace.status === 'ideation_pending') {
+        console.log(`${logPrefix} ⏸️ Workspace is ideation_pending (being created), IGNORING message`);
+        return;
+      }
+
+      if (workspace.status === 'ideation_in_progress' || workspace.status === 'ideation_complete') {
+        console.log(`${logPrefix} 💬 Routing to handleIdeationResponse...`);
         await this.handleIdeationResponse(message, username);
-      } else if (workspace.status === 'awaiting_base_branch') {
-        // Base branch selection phase: handle as branch choice
-        await this.handleBaseBranchResponse(message, workspace.messageId, thread.id, username);
       } else if (workspace.status === 'mr_created' || workspace.status === 'awaiting_validation') {
-        // MR phase: handle as MR feedback
+        console.log(`${logPrefix} 📝 Routing to handleMRFeedback...`);
         await this.handleMRFeedback(message, workspace.messageId, thread.id, username);
+      } else {
+        console.log(`${logPrefix} ⏭️ Workspace status ${workspace.status} not handled, ignoring`);
       }
     } catch (error) {
-      console.error('[Discord] Error handling new message:', error);
+      console.error(`${logPrefix} ❌ Error:`, error);
     }
   }
 
@@ -418,13 +449,16 @@ export class DiscordBot {
   }
 
   private async handleIdeationResponse(message: Message, username: string): Promise<void> {
+    const thread = message.channel as ThreadChannel;
+    const logPrefix = `[Discord][handleIdeationResponse][${thread.id}]`;
+
     try {
-      const thread = message.channel as ThreadChannel;
+      console.log(`${logPrefix} 🚀 ENTER - from ${username}`);
 
       // Get the starter message ID to find the workspace
       const starterMessage = await thread.fetchStarterMessage();
       if (!starterMessage) {
-        console.log(`[Discord] Could not fetch starter message for thread ${thread.id}`);
+        console.log(`${logPrefix} ❌ Could not fetch starter message`);
         return;
       }
 
@@ -432,25 +466,27 @@ export class DiscordBot {
       const workspace = this.storage.getWorkspace(messageId);
 
       if (!workspace) {
-        console.log(`[Discord] No workspace found for thread ${thread.id}`);
+        console.log(`${logPrefix} ❌ No workspace found for messageId ${messageId}`);
         return;
       }
+
+      console.log(`${logPrefix} Workspace status: ${workspace.status}`);
 
       // Check if workspace is in ideation phase
       if (!workspace.status.startsWith('ideation_')) {
-        console.log(`[Discord] Workspace ${messageId} not in ideation phase (status: ${workspace.status})`);
+        console.log(`${logPrefix} ⏭️ Not in ideation phase, ignoring`);
         return;
       }
 
-      console.log(`[Discord] User response in ideation thread: ${thread.id}`);
-      console.log(`[Discord] Response: ${message.content.substring(0, 100)}...`);
+      console.log(`${logPrefix} 📤 Calling onIdeationResponse...`);
 
       // Trigger ideation response event
       if (this.events.onIdeationResponse) {
         await this.events.onIdeationResponse(messageId, thread.id, message.content);
       }
+      console.log(`${logPrefix} ✅ EXIT - onIdeationResponse completed`);
     } catch (error) {
-      console.error('[Discord] Error handling ideation response:', error);
+      console.error(`${logPrefix} ❌ Error:`, error);
     }
   }
 
@@ -458,7 +494,10 @@ export class DiscordBot {
    * Handle base branch selection response
    */
   private async handleBaseBranchResponse(message: Message, messageId: string, threadId: string, author: string): Promise<void> {
+    const logPrefix = `[Discord][handleBaseBranchResponse][${threadId}]`;
     const content = message.content.trim().toLowerCase();
+
+    console.log(`${logPrefix} 🌿 ENTER - Parsing branch from: "${content}"`);
 
     // Parse the branch choice
     // Supported formats:
@@ -490,16 +529,18 @@ export class DiscordBot {
     }
 
     if (!baseBranch) {
-      console.log(`[Discord] Could not parse base branch from: ${message.content}`);
+      console.log(`${logPrefix} ❌ Could not parse base branch`);
       return;
     }
 
-    console.log(`[Discord] Base branch selected by ${author}: ${baseBranch}`);
+    console.log(`${logPrefix} ✅ Parsed branch: ${baseBranch}`);
+    console.log(`${logPrefix} 📤 Calling onBaseBranchResponse...`);
 
     // Trigger base branch response event
     if (this.events.onBaseBranchResponse) {
       await this.events.onBaseBranchResponse(messageId, threadId, baseBranch, author);
     }
+    console.log(`${logPrefix} ✅ EXIT - onBaseBranchResponse completed`);
   }
 
   private async getOrCreateThread(message: Message): Promise<ThreadChannel> {
@@ -706,6 +747,34 @@ export class DiscordBot {
     } catch (error) {
       console.error(`[Discord] Error posting to thread ${threadId}:`, error);
       throw error;
+    }
+  }
+
+  /**
+   * Fetch the first (starter) message content from a thread
+   * Used to retrieve the original request after workspace creation
+   */
+  async getThreadFirstMessage(threadId: string): Promise<{ content: string; author: string } | null> {
+    try {
+      const thread = await this.client.channels.fetch(threadId) as ThreadChannel;
+      if (!thread || !thread.isThread()) {
+        console.error(`[Discord] Thread ${threadId} not found or not a thread`);
+        return null;
+      }
+
+      const starterMessage = await thread.fetchStarterMessage();
+      if (!starterMessage) {
+        console.error(`[Discord] Could not fetch starter message for thread ${threadId}`);
+        return null;
+      }
+
+      return {
+        content: starterMessage.content,
+        author: starterMessage.author?.username || 'unknown',
+      };
+    } catch (error) {
+      console.error(`[Discord] Error fetching first message from thread ${threadId}:`, error);
+      return null;
     }
   }
 
@@ -1038,7 +1107,8 @@ export class DiscordBot {
   }
 
   private async scanPrivateForumForIdeation(forum: ForumChannel): Promise<void> {
-    console.log(`[Discord] Scanning private forum for threads needing ideation...`);
+    const logPrefix = `[Discord][scanPrivateForumForIdeation]`;
+    console.log(`${logPrefix} 🔍 Scanning private forum for threads needing ideation...`);
 
     const allThreads: ThreadChannel[] = [];
 
@@ -1050,9 +1120,10 @@ export class DiscordBot {
     const archivedThreads = await forum.threads.fetchArchived({ limit: 100 });
     allThreads.push(...Array.from(archivedThreads.threads.values()));
 
-    console.log(`[Discord] Found ${allThreads.length} total threads to check`);
+    console.log(`${logPrefix} Found ${allThreads.length} total threads to check`);
 
     for (const thread of allThreads) {
+      const threadLogPrefix = `${logPrefix}[${thread.id}]`;
       try {
         const starterMessage = await thread.fetchStarterMessage();
         if (!starterMessage || starterMessage.author.bot) {
@@ -1063,14 +1134,19 @@ export class DiscordBot {
         const username = starterMessage.author.username || 'unknown';
 
         // Skip if already processed or has a workspace
-        if (this.storage.isProcessed(messageId) || this.sessionProcessed.has(messageId)) {
+        if (this.storage.isProcessed(messageId)) {
+          console.log(`${threadLogPrefix} ⏭️ Already processed in storage`);
+          continue;
+        }
+        if (this.sessionProcessed.has(messageId)) {
+          console.log(`${threadLogPrefix} ⏭️ Already processed in session`);
           continue;
         }
 
         // Skip if already has a workspace (even in ideation phase)
         const existingWorkspace = this.storage.getWorkspace(messageId);
         if (existingWorkspace) {
-          console.log(`[Discord] Thread ${thread.id} already has workspace in status: ${existingWorkspace.status}`);
+          console.log(`${threadLogPrefix} ⏭️ Already has workspace (status: ${existingWorkspace.status})`);
           continue;
         }
 
@@ -1079,27 +1155,14 @@ export class DiscordBot {
           continue;
         }
 
-        console.log(`[Discord] Found unprocessed thread: ${thread.name}`);
-        console.log(`[Discord] Starting ideation for thread ${thread.id}...`);
+        // IMPORTANT: Add to sessionProcessed IMMEDIATELY to prevent race conditions
+        this.sessionProcessed.add(messageId);
+        console.log(`${threadLogPrefix} ✅ Added to sessionProcessed`);
 
-        // Fetch all existing messages in the thread
-        let existingMessages: string[] = [];
-        try {
-          const messages = await thread.messages.fetch({ limit: 100 });
-          existingMessages = messages
-            .filter((m) => !m.author.bot) // Exclude bot messages
-            .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
-            .map((m) => `${m.author.username}: ${m.content}`)
-            .filter((msg) => msg.trim());
+        console.log(`${threadLogPrefix} 🆕 Found unprocessed thread: ${thread.name}`);
+        console.log(`${threadLogPrefix} 📤 Calling onIdeationStart...`);
 
-          if (existingMessages.length > 1) {
-            console.log(`[Discord] Found ${existingMessages.length} existing messages in thread`);
-          }
-        } catch (error) {
-          console.warn(`[Discord] Could not fetch thread messages:`, error);
-        }
-
-        // Trigger ideation start event
+        // Trigger ideation start event (no messages passed - will be fetched after workspace creation)
         if (this.events.onIdeationStart) {
           await this.events.onIdeationStart(
             messageId,
@@ -1107,11 +1170,12 @@ export class DiscordBot {
             thread.id,
             starterMessage.content,
             username,
-            existingMessages.length > 0 ? existingMessages : undefined
+            undefined  // No existing messages - will be fetched after workspace creation
           );
         }
+        console.log(`${threadLogPrefix} ✅ onIdeationStart completed`);
       } catch (error) {
-        console.error(`[Discord] Error processing thread ${thread.id}:`, error);
+        console.error(`${threadLogPrefix} ❌ Error:`, error);
       }
     }
   }
