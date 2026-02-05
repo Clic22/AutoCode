@@ -24,6 +24,7 @@ interface WorkspaceRow {
   last_ideation_timestamp: number | null;
   source_message_id: string | null;
   source_channel_id: string | null;
+  base_branch: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -192,6 +193,7 @@ export class SupabaseStorage {
       lastIdeationTimestamp: row.last_ideation_timestamp || undefined,
       sourceMessageId: row.source_message_id || undefined,
       sourceChannelId: row.source_channel_id || undefined,
+      baseBranch: row.base_branch || undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -278,6 +280,7 @@ export class SupabaseStorage {
         last_ideation_timestamp: info.lastIdeationTimestamp || null,
         source_message_id: info.sourceMessageId || null,
         source_channel_id: info.sourceChannelId || null,
+        base_branch: info.baseBranch || null,
         created_at: now,
         updated_at: now,
       });
@@ -320,7 +323,7 @@ export class SupabaseStorage {
   async updateWorkspaceStatus(
     messageId: string,
     status: WorkspaceStatus,
-    extra?: Partial<Pick<WorkspaceInfo, 'developmentPrompt' | 'lastError' | 'mrUrl' | 'attempt' | 'lastFeedbackAt' | 'feedbackCount' | 'threadId' | 'ideationConversation' | 'lastIdeationTimestamp' | 'workspacePath' | 'repoPath'>>
+    extra?: Partial<Pick<WorkspaceInfo, 'developmentPrompt' | 'lastError' | 'mrUrl' | 'attempt' | 'lastFeedbackAt' | 'feedbackCount' | 'threadId' | 'ideationConversation' | 'lastIdeationTimestamp' | 'workspacePath' | 'repoPath' | 'baseBranch'>>
   ): Promise<void> {
     const workspace = this.cache.workspaces[messageId];
     if (!workspace) {
@@ -346,6 +349,7 @@ export class SupabaseStorage {
       if (extra.threadId !== undefined) workspaceUpdate.thread_id = extra.threadId;
       if (extra.ideationConversation !== undefined) workspaceUpdate.ideation_conversation = extra.ideationConversation;
       if (extra.lastIdeationTimestamp !== undefined) workspaceUpdate.last_ideation_timestamp = extra.lastIdeationTimestamp;
+      if (extra.baseBranch !== undefined) workspaceUpdate.base_branch = extra.baseBranch;
     }
 
     const { error: workspaceError } = await this.client
@@ -405,6 +409,7 @@ export class SupabaseStorage {
       if (extra.threadId !== undefined) workspace.threadId = extra.threadId;
       if (extra.ideationConversation !== undefined) workspace.ideationConversation = extra.ideationConversation;
       if (extra.lastIdeationTimestamp !== undefined) workspace.lastIdeationTimestamp = extra.lastIdeationTimestamp;
+      if (extra.baseBranch !== undefined) workspace.baseBranch = extra.baseBranch;
     }
 
     console.log(`[SupabaseStorage] Updated workspace ${messageId} status: ${status}`);

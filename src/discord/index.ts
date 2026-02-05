@@ -40,6 +40,8 @@ export interface DiscordBotEvents {
   ) => Promise<void>;
   onDiscordFeedback?: (messageId: string, threadId: string, feedback: string, author: string) => Promise<void>;
   onDiscordValidation?: (messageId: string) => Promise<void>;
+  onBaseBranchResponse?: (messageId: string, threadId: string, baseBranch: string, author: string) => Promise<void>;
+  onIdeationApproved?: (messageId: string, threadId: string) => Promise<void>;
 }
 
 export class DiscordBot {
@@ -233,9 +235,20 @@ export class DiscordBot {
         }
       }
 
-      // Standard flow: ideation complete -> implementation
+      // Standard flow: ideation complete -> ask for base branch -> implementation
       if (this.storage.isProcessed(message.id) || this.sessionProcessed.has(message.id)) {
         console.log(`[Discord] Message ${message.id} already processed, skipping`);
+        return;
+      }
+
+      // Check if this is a workspace in ideation_complete status
+      const workspace = this.storage.getWorkspace(message.id);
+      if (workspace && workspace.status === 'ideation_complete' && workspace.threadId && !workspace.baseBranch) {
+        console.log(`[Discord] ✅ Ideation approval detected on message ${message.id} by ${username}`);
+        // Trigger ideation approved event to ask for base branch
+        if (this.events.onIdeationApproved) {
+          await this.events.onIdeationApproved(message.id, workspace.threadId);
+        }
         return;
       }
 
@@ -357,6 +370,9 @@ export class DiscordBot {
       if (workspace.status.startsWith('ideation_')) {
         // Ideation phase: handle as ideation response
         await this.handleIdeationResponse(message, username);
+      } else if (workspace.status === 'awaiting_base_branch') {
+        // Base branch selection phase: handle as branch choice
+        await this.handleBaseBranchResponse(message, workspace.messageId, thread.id, username);
       } else if (workspace.status === 'mr_created' || workspace.status === 'awaiting_validation') {
         // MR phase: handle as MR feedback
         await this.handleMRFeedback(message, workspace.messageId, thread.id, username);
@@ -433,6 +449,54 @@ export class DiscordBot {
       }
     } catch (error) {
       console.error('[Discord] Error handling ideation response:', error);
+    }
+  }
+
+  /**
+   * Handle base branch selection response
+   */
+  private async handleBaseBranchResponse(message: Message, messageId: string, threadId: string, author: string): Promise<void> {
+    const content = message.content.trim().toLowerCase();
+
+    // Parse the branch choice
+    // Supported formats:
+    // - "1", "2", "3", "4" (option numbers)
+    // - "preview", "stable", "beta" (branch names)
+    // - "release/preview", "release/stable", "release/beta" (full branch names)
+    // - Any other text is treated as a custom branch name
+
+    let baseBranch: string | null = null;
+
+    // Check for numbered options
+    if (content === '1' || content.includes('preview')) {
+      baseBranch = 'release/preview';
+    } else if (content === '2' || content.includes('stable')) {
+      baseBranch = 'release/stable';
+    } else if (content === '3' || content.includes('beta')) {
+      baseBranch = 'release/beta';
+    } else if (content === '4' || content.startsWith('autre') || content.startsWith('other') || content.startsWith('custom')) {
+      // User wants to specify a custom branch
+      // Try to extract branch name from the message
+      // Format: "4: my-branch" or "autre: my-branch" or just a branch name
+      const branchMatch = message.content.match(/(?:4|autre|other|custom)\s*[:=]?\s*(.+)/i);
+      if (branchMatch) {
+        baseBranch = branchMatch[1].trim();
+      }
+    } else {
+      // Treat as custom branch name directly
+      baseBranch = message.content.trim();
+    }
+
+    if (!baseBranch) {
+      console.log(`[Discord] Could not parse base branch from: ${message.content}`);
+      return;
+    }
+
+    console.log(`[Discord] Base branch selected by ${author}: ${baseBranch}`);
+
+    // Trigger base branch response event
+    if (this.events.onBaseBranchResponse) {
+      await this.events.onBaseBranchResponse(messageId, threadId, baseBranch, author);
     }
   }
 

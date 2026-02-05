@@ -53,6 +53,8 @@ class AutoCode {
         onPublicChannelApproval: this.handlePublicChannelApproval.bind(this),
         onDiscordFeedback: this.handleDiscordFeedback.bind(this),
         onDiscordValidation: this.handleDiscordValidation.bind(this),
+        onBaseBranchResponse: this.handleBaseBranchResponse.bind(this),
+        onIdeationApproved: this.handleIdeationApproved.bind(this),
       },
       storage
     );
@@ -82,10 +84,11 @@ class AutoCode {
     // Filter out workspaces that are waiting for external events, not processing
     // - ideation_complete: waiting for approval emoji on Discord
     // - ideation_in_progress: waiting for user response in Discord thread
+    // - awaiting_base_branch: waiting for user to select base branch
     // - awaiting_validation: waiting for feedback/approval in Discord thread
     // - mr_created: waiting for feedback/approval in Discord thread
     // Only resume workspaces that are actively being processed
-    const waitingStatuses = ['ideation_complete', 'ideation_in_progress', 'awaiting_validation', 'mr_created'];
+    const waitingStatuses = ['ideation_complete', 'ideation_in_progress', 'awaiting_base_branch', 'awaiting_validation', 'mr_created'];
     const incompleteWorkspaces = allIncompleteWorkspaces.filter(ws => !waitingStatuses.includes(ws.status));
 
     const waitingWorkspaces = allIncompleteWorkspaces.filter(ws => waitingStatuses.includes(ws.status));
@@ -655,6 +658,88 @@ class AutoCode {
     console.log(`[AutoCode] ✅ Workspace ${messageId} completed and validated via Discord`);
   }
 
+  /**
+   * Handle ideation approval - ask user which base branch to use
+   */
+  private async handleIdeationApproved(messageId: string, threadId: string): Promise<void> {
+    console.log(`[AutoCode] Ideation approved for workspace ${messageId}, asking for base branch`);
+
+    const workspace = this.storage.getWorkspace(messageId);
+    if (!workspace) {
+      console.error(`[AutoCode] Workspace not found for ${messageId}`);
+      return;
+    }
+
+    // Update status to awaiting_base_branch
+    await this.storage.updateWorkspaceStatus(messageId, 'awaiting_base_branch');
+
+    // Send message asking for base branch choice
+    const branchChoiceMessage = `🌿 **Choix de la branche de base**\n\n` +
+      `Sur quelle branche souhaitez-vous baser ce développement ?\n\n` +
+      `**Options disponibles :**\n` +
+      `1️⃣ \`release/preview\` - Release preview (défaut)\n` +
+      `2️⃣ \`release/stable\` - Release stable\n` +
+      `3️⃣ \`release/beta\` - Release beta\n` +
+      `4️⃣ Autre - Spécifiez une branche personnalisée\n\n` +
+      `_Répondez avec le numéro (1, 2, 3) ou tapez directement le nom de la branche._`;
+
+    await this.discord.postToThread(threadId, branchChoiceMessage);
+
+    console.log(`[AutoCode] Posted branch choice message to thread ${threadId}`);
+  }
+
+  /**
+   * Handle base branch response from user
+   */
+  private async handleBaseBranchResponse(
+    messageId: string,
+    threadId: string,
+    baseBranch: string,
+    author: string
+  ): Promise<void> {
+    console.log(`[AutoCode] Base branch selected for workspace ${messageId}: ${baseBranch}`);
+
+    const workspace = this.storage.getWorkspace(messageId);
+    if (!workspace) {
+      console.error(`[AutoCode] Workspace not found for ${messageId}`);
+      return;
+    }
+
+    // Check if workspace is in the correct status
+    if (workspace.status !== 'awaiting_base_branch') {
+      console.log(`[AutoCode] Workspace ${messageId} is not awaiting base branch (status: ${workspace.status})`);
+      return;
+    }
+
+    // Save the selected base branch
+    await this.storage.updateWorkspaceStatus(messageId, 'ideation_complete', {
+      baseBranch: baseBranch,
+    });
+
+    // Confirm the choice
+    await this.discord.postToThread(threadId,
+      `✅ **Branche de base sélectionnée :** \`${baseBranch}\`\n\n` +
+      `Préparation du workspace et lancement de l'implémentation...`
+    );
+
+    // Create CodeRequest and queue for processing
+    const request: CodeRequest = {
+      id: messageId,
+      messageId: messageId,
+      channelId: '',
+      content: workspace.ideationConversation?.join('\n\n') || '',
+      author: author,
+      approvedBy: author,
+      timestamp: new Date(),
+    };
+
+    this.requestQueue.push(request);
+    console.log(`[AutoCode] Request ${messageId} added to queue after base branch selection`);
+
+    // Try to process
+    this.processNextRequests();
+  }
+
   private processNextRequests(): void {
     // Start new requests up to the max concurrent limit
     while (this.requestQueue.length > 0 && this.activeRequests < MAX_CONCURRENT_REQUESTS) {
@@ -703,7 +788,12 @@ class AutoCode {
           // Create workspace and worktree now
           workspace = await this.workspaceManager.create(request.id);
           branchName = workspaceInfo.branchName;
-          repoPath = await this.gitManager.createWorktree(workspace, branchName);
+          // Use the selected base branch if available
+          const baseBranch = workspaceInfo.baseBranch;
+          if (baseBranch) {
+            console.log(`${getLogPrefix()} Using selected base branch: ${baseBranch}`);
+          }
+          repoPath = await this.gitManager.createWorktree(workspace, branchName, baseBranch);
 
           // Update workspace info with actual paths
           await this.storage.updateWorkspaceStatus(request.id, workspaceInfo.status, {
@@ -858,6 +948,12 @@ class AutoCode {
     if (initialStatus === 'ideation_in_progress') {
       log('Ideation in progress - waiting for user response in Discord thread...');
       // TODO: Could re-read thread to check for missed messages, but for now just wait
+      return;
+    }
+
+    // Handle awaiting_base_branch status - waiting for user to select base branch
+    if (initialStatus === 'awaiting_base_branch') {
+      log('Waiting for user to select base branch in Discord thread...');
       return;
     }
 
@@ -1071,7 +1167,11 @@ class AutoCode {
     // Step 6: Create Merge Request
     if (needsCommit || needsPush || needsMR) {
       log('[Step 6] Creating Merge Request...');
-      const targetBranch = 'release/preview';
+      // Use the selected base branch as target, or default to release/preview
+      const targetBranch = workspaceInfo.baseBranch || 'release/preview';
+      if (workspaceInfo.baseBranch) {
+        log(`Using selected target branch: ${targetBranch}`);
+      }
 
       // Extract meaningful title and test checklist from development prompt
       const featureTitle = this.extractFeatureTitle(developmentPrompt || '', branchName);

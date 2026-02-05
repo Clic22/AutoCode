@@ -250,9 +250,13 @@ export class GitManager implements GitOperations {
   /**
    * Create a worktree for a specific request - this is very fast!
    * Uses mutex to prevent concurrent access to base repo
+   * @param workspace The workspace to create the worktree in
+   * @param featureBranchName The name of the feature branch to create
+   * @param customBaseBranch Optional custom base branch (defaults to this.baseBranch)
    */
-  async createWorktree(workspace: Workspace, featureBranchName: string): Promise<string> {
+  async createWorktree(workspace: Workspace, featureBranchName: string, customBaseBranch?: string): Promise<string> {
     const worktreePath = path.join(workspace.path, 'repo');
+    const baseBranchToUse = customBaseBranch || this.baseBranch;
 
     // Acquire lock for base repo operations
     return this.baseRepoMutex.withLock(async () => {
@@ -269,6 +273,7 @@ export class GitManager implements GitOperations {
 
       console.log(`[Git] Creating worktree at: ${worktreePath}`);
       console.log(`[Git] Feature branch: ${featureBranchName}`);
+      console.log(`[Git] Base branch: ${baseBranchToUse}`);
 
       // Create worktree with a new branch based on the base branch
       // git worktree add <path> -b <new-branch> <start-point>
@@ -278,7 +283,7 @@ export class GitManager implements GitOperations {
         worktreePath,
         '-b',
         featureBranchName,
-        `origin/${this.baseBranch}`,
+        `origin/${baseBranchToUse}`,
       ]);
 
       console.log('[Git] Worktree created');

@@ -19,7 +19,7 @@ export interface IStorage {
   updateWorkspaceStatus(
     messageId: string,
     status: WorkspaceStatus,
-    extra?: Partial<Pick<WorkspaceInfo, 'developmentPrompt' | 'lastError' | 'mrUrl' | 'attempt' | 'lastFeedbackAt' | 'feedbackCount' | 'threadId' | 'ideationConversation' | 'lastIdeationTimestamp' | 'workspacePath' | 'repoPath'>>
+    extra?: Partial<Pick<WorkspaceInfo, 'developmentPrompt' | 'lastError' | 'mrUrl' | 'attempt' | 'lastFeedbackAt' | 'feedbackCount' | 'threadId' | 'ideationConversation' | 'lastIdeationTimestamp' | 'workspacePath' | 'repoPath' | 'baseBranch'>>
   ): Promise<void>;
   deleteWorkspace(messageId: string): Promise<void>;
   getIncompleteWorkspaces(): WorkspaceInfo[];
@@ -44,6 +44,7 @@ export type WorkspaceStatus =
   | 'ideation_pending'  // New message in private channel, ideation not started yet
   | 'ideation_in_progress' // Ideation phase active, asking questions
   | 'ideation_complete' // Ideation done, waiting for approval emoji
+  | 'awaiting_base_branch' // Waiting for user to choose base branch
   | 'analysis'          // Phase 1: Analysis in progress
   | 'analysis_done'     // Phase 1 complete, prompt generated
   | 'implementation'    // Phase 2: Implementation in progress
@@ -77,6 +78,8 @@ export interface WorkspaceInfo {
   // Cross-channel tracking (public channel -> private channel thread)
   sourceMessageId?: string;     // ID of the original message (from public channel)
   sourceChannelId?: string;     // ID of the original channel (public channel)
+  // Base branch selection (for creating worktree)
+  baseBranch?: string;          // Selected base branch (e.g., release/preview, release/stable)
   createdAt: number;
   updatedAt: number;
 }
@@ -198,7 +201,7 @@ export class Storage {
   async updateWorkspaceStatus(
     messageId: string,
     status: WorkspaceStatus,
-    extra?: Partial<Pick<WorkspaceInfo, 'developmentPrompt' | 'lastError' | 'mrUrl' | 'attempt' | 'lastFeedbackAt' | 'feedbackCount' | 'threadId' | 'ideationConversation' | 'lastIdeationTimestamp' | 'workspacePath' | 'repoPath'>>
+    extra?: Partial<Pick<WorkspaceInfo, 'developmentPrompt' | 'lastError' | 'mrUrl' | 'attempt' | 'lastFeedbackAt' | 'feedbackCount' | 'threadId' | 'ideationConversation' | 'lastIdeationTimestamp' | 'workspacePath' | 'repoPath' | 'baseBranch'>>
   ): Promise<void> {
     const workspace = this.data.workspaces[messageId];
     if (workspace) {
@@ -216,6 +219,7 @@ export class Storage {
         if (extra.lastIdeationTimestamp !== undefined) workspace.lastIdeationTimestamp = extra.lastIdeationTimestamp;
         if (extra.workspacePath !== undefined) workspace.workspacePath = extra.workspacePath;
         if (extra.repoPath !== undefined) workspace.repoPath = extra.repoPath;
+        if (extra.baseBranch !== undefined) workspace.baseBranch = extra.baseBranch;
       }
       await this.save();
       console.log(`[Storage] Updated workspace ${messageId} status: ${status}`);
