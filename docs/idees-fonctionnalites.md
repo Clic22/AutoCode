@@ -4,6 +4,8 @@
 
 ## 1. Configuration Discord sur Supabase
 
+**Statut:** ❌ Non implémenté
+
 **Résumé:** Migrer la configuration Discord (Channel IDs, Approval Emoji, Private Channel IDs) depuis le fichier .env vers Supabase, tout en conservant les tokens sensibles dans .env.
 
 **Prompt original:**
@@ -12,6 +14,8 @@
 ---
 
 ## 2. Notifications de Statut sur Discord
+
+**Statut:** ✅ Implémenté
 
 **Résumé:** Envoyer des messages de statut dans la conversation Discord associée au développement pour informer de l'avancement : début d'implémentation, passage en review, échec de review, retry, nombre d'attempts atteint, et création de MR avec lien direct.
 
@@ -22,6 +26,8 @@
 
 ## 3. Commentaires Discord pour Modifications MR
 
+**Statut:** ✅ Implémenté
+
 **Résumé:** Supprimer la vérification continue des commentaires GitLab. Utiliser à la place les commentaires dans la conversation Discord associée à la MR pour déclencher des modifications sur la branche et le workspace correspondants.
 
 **Prompt original:**
@@ -30,6 +36,8 @@
 ---
 
 ## 4. Choix de la Branche de Base
+
+**Statut:** ✅ Implémenté
 
 **Résumé:** Ajouter une étape interactive où l'agent demande sur quelle branche de base créer la nouvelle branche, permettant de développer sur release stable, beta ou autre, au lieu de toujours partir de release preview.
 
@@ -40,6 +48,8 @@
 
 ## 5. Exploration des Channels Publics Discord
 
+**Statut:** ❌ Non implémenté
+
 **Résumé:** Ajouter une fonctionnalité d'exploration continue des channels publics Discord pour identifier des sujets/bugs faciles à traiter, les proposer dans un channel dédié avec un résumé et le lien vers le thread original.
 
 **Prompt original:**
@@ -48,6 +58,8 @@
 ---
 
 ## 6. Cleanup Automatique des Workspaces
+
+**Statut:** ❌ Non implémenté
 
 **Résumé:** Nettoyer automatiquement les workspaces lorsqu'une MR est mergée ou qu'un sujet Discord est supprimé, pour éviter l'accumulation.
 
@@ -58,6 +70,8 @@
 
 ## 7. Développement Multi-Agents avec Vote
 
+**Statut:** ❌ Non implémenté
+
 **Résumé:** Pour une même fonctionnalité, lancer 3 agents/workspaces en parallèle. Un agent évaluateur compare ensuite les 3 implémentations et sélectionne le meilleur travail, en s'inspirant des systèmes critiques à vote majoritaire. L'évaluateur peut combiner des éléments de plusieurs implémentations tout en garantissant la cohérence et l'absence de problèmes de compilation.
 
 **Prompt original:**
@@ -66,6 +80,8 @@
 ---
 
 ## 8. Exploration du Code pendant l'Idéation
+
+**Statut:** ✅ Implémenté
 
 **Résumé:** Pendant la phase d'idéation, l'agent doit également parcourir et lire le code du workspace (en plus de la conversation Discord) pour comprendre la structure, l'architecture, la complexité et la faisabilité. Cela permet des échanges plus riches où l'utilisateur peut référencer des fichiers/classes spécifiques et l'agent peut poser des questions contextuelles sur le code existant. Important : à cette phase, l'agent lit le code mais n'écrit rien.
 
