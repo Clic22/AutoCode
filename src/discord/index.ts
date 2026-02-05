@@ -237,13 +237,10 @@ export class DiscordBot {
 
       // Standard flow: ideation complete -> implementation
       // (NEW FLOW: base branch is selected at the beginning, not after ideation)
-      if (this.storage.isProcessed(message.id) || this.sessionProcessed.has(message.id)) {
-        console.log(`[Discord] Message ${message.id} already processed, skipping`);
-        return;
-      }
 
-      // Check if this is a workspace in ideation_complete status
-      // In the new flow, baseBranch is already set (selected at the beginning)
+      // IMPORTANT: Check ideation_complete FIRST, before sessionProcessed check
+      // The message was added to sessionProcessed when ideation started, but we still
+      // need to allow the approval emoji to trigger implementation
       const workspace = this.storage.getWorkspace(message.id);
       if (workspace && workspace.status === 'ideation_complete' && workspace.threadId) {
         console.log(`[Discord] ✅ Ideation approval detected on message ${message.id} by ${username}`);
@@ -251,6 +248,12 @@ export class DiscordBot {
         if (this.events.onIdeationApproved) {
           await this.events.onIdeationApproved(message.id, workspace.threadId);
         }
+        return;
+      }
+
+      // Now check if already processed (for non-ideation flows)
+      if (this.storage.isProcessed(message.id) || this.sessionProcessed.has(message.id)) {
+        console.log(`[Discord] Message ${message.id} already processed, skipping`);
         return;
       }
 
@@ -1368,6 +1371,68 @@ export class DiscordBot {
     if (channel && channel instanceof TextChannel) {
       const message = await channel.messages.fetch(messageId);
       await message.reply(content);
+    }
+  }
+
+  /**
+   * Get the last message in a thread and determine if it's from a user or the bot
+   * Returns null if thread not found or no messages
+   */
+  async getThreadLastMessage(threadId: string): Promise<{
+    isFromBot: boolean;
+    content: string;
+    authorUsername: string;
+    messageId: string;
+  } | null> {
+    try {
+      const channel = await this.client.channels.fetch(threadId);
+      if (!channel || !channel.isThread()) {
+        console.log(`[Discord] Thread ${threadId} not found or not a thread`);
+        return null;
+      }
+
+      const thread = channel as ThreadChannel;
+      const messages = await thread.messages.fetch({ limit: 10 });
+
+      if (messages.size === 0) {
+        console.log(`[Discord] No messages found in thread ${threadId}`);
+        return null;
+      }
+
+      // Get the most recent message (sorted by timestamp descending by default)
+      const lastMessage = messages.first();
+      if (!lastMessage) {
+        return null;
+      }
+
+      return {
+        isFromBot: lastMessage.author.bot,
+        content: lastMessage.content,
+        authorUsername: lastMessage.author.username || 'unknown',
+        messageId: lastMessage.id,
+      };
+    } catch (error) {
+      console.error(`[Discord] Error fetching last message for thread ${threadId}:`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Get the starter message ID for a thread
+   */
+  async getThreadStarterMessageId(threadId: string): Promise<string | null> {
+    try {
+      const channel = await this.client.channels.fetch(threadId);
+      if (!channel || !channel.isThread()) {
+        return null;
+      }
+
+      const thread = channel as ThreadChannel;
+      const starterMessage = await thread.fetchStarterMessage();
+      return starterMessage?.id || null;
+    } catch (error) {
+      console.error(`[Discord] Error fetching starter message for thread ${threadId}:`, error);
+      return null;
     }
   }
 }

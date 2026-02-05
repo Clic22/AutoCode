@@ -111,6 +111,14 @@ class AutoCode {
       for (const ws of waitingWorkspaces) {
         console.log(`  - ${ws.messageId}: ${ws.status}`);
       }
+
+      // Check if any ideation conversations need to be resumed
+      // (last message was from user, not the bot)
+      await this.resumeIdeationConversations(waitingWorkspaces);
+
+      // Check if any MR feedback conversations need to be resumed
+      // (last message was from user, not the bot - could be feedback or approval)
+      await this.resumeMRFeedbackConversations(waitingWorkspaces);
     }
 
     if (incompleteWorkspaces.length > 0) {
@@ -169,6 +177,128 @@ class AutoCode {
 
     console.log('\n[AutoCode] Ready and waiting for new approved requests...');
     console.log('[AutoCode] Feedback will be received via Discord threads (GitLab polling removed)');
+  }
+
+  /**
+   * Resume ideation conversations where the last message was from a user (not the bot).
+   * This handles the case where the bot was restarted while waiting for a response
+   * that the user had already provided.
+   */
+  private async resumeIdeationConversations(waitingWorkspaces: WorkspaceInfo[]): Promise<void> {
+    const ideationWorkspaces = waitingWorkspaces.filter(
+      ws => ws.status === 'ideation_in_progress' && ws.threadId
+    );
+
+    if (ideationWorkspaces.length === 0) {
+      return;
+    }
+
+    console.log(`\n[AutoCode] Checking ${ideationWorkspaces.length} ideation conversation(s) for pending user messages...`);
+
+    for (const ws of ideationWorkspaces) {
+      const logPrefix = `[AutoCode][resumeIdeation][${ws.threadId}]`;
+      try {
+        if (!ws.threadId) {
+          continue;
+        }
+
+        const lastMessage = await this.discord.getThreadLastMessage(ws.threadId);
+        if (!lastMessage) {
+          console.log(`${logPrefix} Could not fetch last message, skipping`);
+          continue;
+        }
+
+        console.log(`${logPrefix} Last message from: ${lastMessage.authorUsername} (bot: ${lastMessage.isFromBot})`);
+
+        if (!lastMessage.isFromBot) {
+          // Last message is from a user, need to resume the conversation
+          console.log(`${logPrefix} 🔄 Resuming ideation - user message pending: "${lastMessage.content.substring(0, 50)}..."`);
+
+          // Check if this message is already in the conversation history
+          const conversation = ws.ideationConversation || [];
+          const lastUserMessage = `User: ${lastMessage.content}`;
+          const alreadyProcessed = conversation.some(msg => msg === lastUserMessage);
+
+          if (alreadyProcessed) {
+            console.log(`${logPrefix} ⏭️ Message already in conversation history, skipping`);
+            continue;
+          }
+
+          // Resume by calling handleIdeationResponse with the user's message
+          console.log(`${logPrefix} 📤 Calling handleIdeationResponse...`);
+          await this.handleIdeationResponse(ws.messageId, ws.threadId, lastMessage.content);
+          console.log(`${logPrefix} ✅ Ideation resumed successfully`);
+        } else {
+          console.log(`${logPrefix} ⏸️ Last message is from bot, waiting for user response`);
+        }
+      } catch (error) {
+        console.error(`${logPrefix} ❌ Error resuming ideation:`, error);
+      }
+    }
+  }
+
+  /**
+   * Resume MR feedback conversations where the last message was from a user (not the bot).
+   * This handles the case where the bot was restarted while waiting for feedback
+   * that the user had already provided on a MR.
+   */
+  private async resumeMRFeedbackConversations(waitingWorkspaces: WorkspaceInfo[]): Promise<void> {
+    const mrWorkspaces = waitingWorkspaces.filter(
+      ws => (ws.status === 'mr_created' || ws.status === 'awaiting_validation') && ws.threadId
+    );
+
+    if (mrWorkspaces.length === 0) {
+      return;
+    }
+
+    console.log(`\n[AutoCode] Checking ${mrWorkspaces.length} MR workspace(s) for pending feedback...`);
+
+    for (const ws of mrWorkspaces) {
+      const logPrefix = `[AutoCode][resumeMRFeedback][${ws.threadId}]`;
+      try {
+        if (!ws.threadId) {
+          continue;
+        }
+
+        const lastMessage = await this.discord.getThreadLastMessage(ws.threadId);
+        if (!lastMessage) {
+          console.log(`${logPrefix} Could not fetch last message, skipping`);
+          continue;
+        }
+
+        console.log(`${logPrefix} Last message from: ${lastMessage.authorUsername} (bot: ${lastMessage.isFromBot})`);
+
+        if (!lastMessage.isFromBot) {
+          // Last message is from a user - check if it's approval or feedback
+          const content = lastMessage.content.trim();
+          const contentLower = content.toLowerCase();
+
+          // Check for approval keywords
+          const approvalKeywords = ['approve', 'approved', 'validated', 'done', 'lgtm', 'ok', '👍', '✅'];
+          const isApproval = approvalKeywords.some(keyword => {
+            if (keyword.length <= 4) {
+              const regex = new RegExp(`\\b${keyword}\\b`, 'i');
+              return regex.test(contentLower);
+            }
+            return contentLower.includes(keyword);
+          });
+
+          if (isApproval) {
+            console.log(`${logPrefix} 🔄 Resuming - validation pending from ${lastMessage.authorUsername}`);
+            await this.handleDiscordValidation(ws.messageId);
+            console.log(`${logPrefix} ✅ Validation processed successfully`);
+          } else {
+            console.log(`${logPrefix} 🔄 Resuming - feedback pending: "${content.substring(0, 50)}..."`);
+            await this.handleDiscordFeedback(ws.messageId, ws.threadId, content, lastMessage.authorUsername);
+            console.log(`${logPrefix} ✅ Feedback processed successfully`);
+          }
+        } else {
+          console.log(`${logPrefix} ⏸️ Last message is from bot, waiting for user feedback`);
+        }
+      } catch (error) {
+        console.error(`${logPrefix} ❌ Error resuming MR feedback:`, error);
+      }
+    }
   }
 
   /**
@@ -1226,8 +1356,9 @@ ${testChecklist}`,
     }
 
     // After MR creation, don't mark as completed yet - wait for feedback loop
-    // The GitLabMonitor will handle the feedback loop and eventual completion
-    if (workspaceInfo.status === 'mr_created' || workspaceInfo.status === 'awaiting_validation') {
+    // IMPORTANT: Reload workspace info to get the current status (it was updated above)
+    const currentWorkspaceInfo = this.storage.getWorkspace(request.id);
+    if (currentWorkspaceInfo && (currentWorkspaceInfo.status === 'mr_created' || currentWorkspaceInfo.status === 'awaiting_validation')) {
       log('Waiting for feedback or validation on MR...');
       return;
     }
