@@ -1236,6 +1236,10 @@ class AutoCode {
 
         if (reviewResult.approved) {
           log('[Phase 3] ✅ QA Review PASSED');
+          await this.notifyThread(request.id,
+            `✅ **Review QA passée !**\n\n` +
+            `L'implémentation a été validée. Préparation du commit et de la MR...`
+          );
           break;
         }
 
