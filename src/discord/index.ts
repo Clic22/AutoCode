@@ -38,6 +38,8 @@ export interface DiscordBotEvents {
     threadMessages: string[],
     approvedBy: string
   ) => Promise<void>;
+  onDiscordFeedback?: (messageId: string, threadId: string, feedback: string, author: string) => Promise<void>;
+  onDiscordValidation?: (messageId: string) => Promise<void>;
 }
 
 export class DiscordBot {
@@ -207,7 +209,31 @@ export class DiscordBot {
         return;
       }
 
-      // Handle PRIVATE channel approval - standard flow (ideation complete -> implementation)
+      // Handle PRIVATE channel approval
+      // First, check if this is a thread with an MR workspace (for validation approval)
+      if (channel.isThread()) {
+        const thread = channel as ThreadChannel;
+        let workspace = this.storage.getWorkspaceByThread(thread.id);
+
+        // If not found by thread, try by starter message
+        if (!workspace) {
+          const starterMessage = await thread.fetchStarterMessage();
+          if (starterMessage) {
+            workspace = this.storage.getWorkspace(starterMessage.id);
+          }
+        }
+
+        // If workspace is in MR phase, this is a validation approval
+        if (workspace && (workspace.status === 'mr_created' || workspace.status === 'awaiting_validation')) {
+          console.log(`[Discord] ✅ Validation emoji detected for workspace ${workspace.messageId} by ${username}`);
+          if (this.events.onDiscordValidation) {
+            await this.events.onDiscordValidation(workspace.messageId);
+          }
+          return;
+        }
+      }
+
+      // Standard flow: ideation complete -> implementation
       if (this.storage.isProcessed(message.id) || this.sessionProcessed.has(message.id)) {
         console.log(`[Discord] Message ${message.id} already processed, skipping`);
         return;
@@ -290,7 +316,7 @@ export class DiscordBot {
         return;
       }
 
-      // Only handle messages in threads for ideation responses
+      // Only handle messages in threads
       const isThread = message.channel.isThread();
       if (!isThread) {
         return;
@@ -311,10 +337,65 @@ export class DiscordBot {
         return;
       }
 
-      // This is a user response in an ideation thread
-      await this.handleIdeationResponse(message, username);
+      // Try to find workspace by thread index first (faster)
+      let workspace = this.storage.getWorkspaceByThread(thread.id);
+
+      // If not found, fall back to fetching starter message (existing behavior)
+      if (!workspace) {
+        const starterMessage = await thread.fetchStarterMessage();
+        if (starterMessage) {
+          workspace = this.storage.getWorkspace(starterMessage.id);
+        }
+      }
+
+      if (!workspace) {
+        console.log(`[Discord] No workspace found for thread ${thread.id}`);
+        return;
+      }
+
+      // Route based on workspace status
+      if (workspace.status.startsWith('ideation_')) {
+        // Ideation phase: handle as ideation response
+        await this.handleIdeationResponse(message, username);
+      } else if (workspace.status === 'mr_created' || workspace.status === 'awaiting_validation') {
+        // MR phase: handle as MR feedback
+        await this.handleMRFeedback(message, workspace.messageId, thread.id, username);
+      }
     } catch (error) {
       console.error('[Discord] Error handling new message:', error);
+    }
+  }
+
+  /**
+   * Handle feedback message in a thread with an active MR
+   */
+  private async handleMRFeedback(message: Message, messageId: string, threadId: string, author: string): Promise<void> {
+    const content = message.content.trim();
+
+    // Check for approval keywords
+    const approvalKeywords = ['approve', 'approved', 'validated', 'done', 'lgtm', 'ok', '👍', '✅'];
+    const contentLower = content.toLowerCase();
+
+    const isApproval = approvalKeywords.some(keyword => {
+      // Match whole word only for short keywords to avoid false positives
+      if (keyword.length <= 4) {
+        const regex = new RegExp(`\\b${keyword}\\b`, 'i');
+        return regex.test(contentLower);
+      }
+      return contentLower.includes(keyword);
+    });
+
+    if (isApproval) {
+      console.log(`[Discord] Validation detected from ${author} in thread ${threadId}`);
+      if (this.events.onDiscordValidation) {
+        await this.events.onDiscordValidation(messageId);
+      }
+    } else {
+      console.log(`[Discord] Feedback received from ${author} in thread ${threadId}`);
+      console.log(`[Discord] Feedback: ${content.substring(0, 100)}...`);
+      if (this.events.onDiscordFeedback) {
+        await this.events.onDiscordFeedback(messageId, threadId, content, author);
+      }
     }
   }
 
@@ -406,7 +487,8 @@ export class DiscordBot {
     sourceContent: string,
     sourceAuthor: string,
     sourceChannelId: string,
-    threadMessages: string[]
+    threadMessages: string[],
+    customTitle?: string
   ): Promise<{ threadId: string; starterMessageId: string }> {
     if (this.privateChannelIds.length === 0) {
       throw new Error('No private channels configured');
@@ -436,8 +518,10 @@ export class DiscordBot {
       starterContent = starterContent.substring(0, 1897) + '...';
     }
 
-    // Create thread name from source content
-    const threadName = `💭 ${sourceContent.substring(0, 80)}${sourceContent.length > 80 ? '...' : ''}`;
+    // Create thread name from custom title or fallback to truncated source content
+    const threadName = customTitle
+      ? `💭 ${customTitle}`
+      : `💭 ${sourceContent.substring(0, 80)}${sourceContent.length > 80 ? '...' : ''}`;
 
     let threadId: string;
     let starterMessageId: string;

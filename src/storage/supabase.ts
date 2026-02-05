@@ -52,6 +52,7 @@ export class SupabaseStorage {
       branchIndex: {},
       processedCommentIds: [],
       sourceMessageIndex: {},
+      threadIndex: {},
     };
   }
 
@@ -121,6 +122,9 @@ export class SupabaseStorage {
           }
           if (ws.source_message_id) {
             this.cache.sourceMessageIndex[ws.source_message_id] = ws.message_id;
+          }
+          if (ws.thread_id) {
+            this.cache.threadIndex[ws.thread_id] = ws.message_id;
           }
         }
       }
@@ -437,6 +441,11 @@ export class SupabaseStorage {
       console.log(`[SupabaseStorage] Removed source message index for ${workspace.sourceMessageId}`);
     }
 
+    if (workspace.threadId && this.cache.threadIndex[workspace.threadId] === messageId) {
+      delete this.cache.threadIndex[workspace.threadId];
+      console.log(`[SupabaseStorage] Removed thread index for ${workspace.threadId}`);
+    }
+
     delete this.cache.workspaces[messageId];
     console.log(`[SupabaseStorage] Deleted workspace record for ${messageId}`);
   }
@@ -520,5 +529,19 @@ export class SupabaseStorage {
     // The index is maintained in cache and via the source_message_id column in workspaces table
     this.cache.sourceMessageIndex[sourceMessageId] = messageId;
     console.log(`[SupabaseStorage] Added source message index: ${sourceMessageId} -> ${messageId}`);
+  }
+
+  // Thread lookup for Discord feedback
+
+  getWorkspaceByThread(threadId: string): WorkspaceInfo | undefined {
+    const messageId = this.cache.threadIndex[threadId];
+    if (!messageId) return undefined;
+    return this.cache.workspaces[messageId];
+  }
+
+  async addThreadIndex(threadId: string, messageId: string): Promise<void> {
+    // The index is maintained in cache and via the thread_id column in workspaces table
+    this.cache.threadIndex[threadId] = messageId;
+    console.log(`[SupabaseStorage] Added thread index: ${threadId} -> ${messageId}`);
   }
 }

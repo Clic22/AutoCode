@@ -356,6 +356,77 @@ ${reviewResult.feedback}
     return null;
   }
 
+  /**
+   * Generate a short, descriptive conversation title based on the request content
+   */
+  async generateConversationTitle(
+    repoPath: string,
+    content: string
+  ): Promise<string | null> {
+    const log = (msg: string) => console.log(`[Claude] ${msg}`);
+    log('Generating conversation title...');
+
+    const prompt = this.buildConversationTitlePrompt(content);
+    // Titles are short, so use a lower threshold
+    const result = await this.execute(repoPath, prompt, undefined, 0, 5);
+
+    if (!result.success) {
+      log('Failed to generate conversation title with Claude');
+      return null;
+    }
+
+    // Parse the output - get the first line that looks like a title
+    const output = result.output.trim();
+    const lines = output.split('\n').filter(l => l.trim());
+
+    // Get the first non-empty line as the title
+    let title = lines[0]?.trim() || null;
+
+    if (title) {
+      // Remove any markdown formatting or quotes
+      title = title.replace(/^[#*"'`]+\s*/, '').replace(/[#*"'`]+$/, '').trim();
+
+      // Ensure it's not too long (Discord thread names max ~100 chars)
+      if (title.length > 90) {
+        title = title.substring(0, 87) + '...';
+      }
+
+      log(`Generated title: ${title}`);
+      return title;
+    }
+
+    log('Could not parse conversation title from Claude output');
+    return null;
+  }
+
+  private buildConversationTitlePrompt(content: string): string {
+    return `You are a conversation title generator. Generate a short, clear, and descriptive title that summarizes the main topic or request.
+
+## Request Content:
+${content.substring(0, 1500)}
+
+## Instructions:
+1. Read and understand the main topic or goal of the request
+2. Generate a SHORT title (5-10 words maximum, ideally under 60 characters)
+3. The title should capture the ESSENCE of what is being requested
+4. Use clear, descriptive language
+5. Do NOT use generic titles like "New Feature Request" or "Bug Fix"
+6. Do NOT include quotes, hashtags, or markdown formatting
+7. Write in the same language as the original request
+
+## Examples:
+- Long request about adding dark mode → "Implement dark mode theme"
+- Request about fixing login issues → "Fix login authentication bug"
+- Request about exporting data → "Add CSV export functionality"
+- Request about performance → "Optimize database query performance"
+- French request about notifications → "Ajout de notifications push"
+
+## Output Format:
+Output ONLY the title, nothing else. No explanations, no quotes, no formatting.
+
+Generate the title:`;
+  }
+
   private buildBranchNamePrompt(content: string): string {
     return `You are a git branch naming expert. Generate a concise, descriptive branch name based on the following request.
 

@@ -34,6 +34,9 @@ export interface IStorage {
   // Cross-channel deduplication
   getWorkspaceBySourceMessage(sourceMessageId: string): WorkspaceInfo | undefined;
   addSourceMessageIndex(sourceMessageId: string, messageId: string): Promise<void>;
+  // Thread lookup for Discord feedback
+  getWorkspaceByThread(threadId: string): WorkspaceInfo | undefined;
+  addThreadIndex(threadId: string, messageId: string): Promise<void>;
 }
 
 export type WorkspaceStatus =
@@ -86,6 +89,7 @@ export interface ProcessedData {
   branchIndex: Record<string, string>;        // branchName -> messageId
   processedCommentIds: string[];              // GitLab comment IDs
   sourceMessageIndex: Record<string, string>; // sourceMessageId -> messageId (for cross-channel deduplication)
+  threadIndex: Record<string, string>;        // threadId -> messageId (for Discord feedback lookup)
 }
 
 export class Storage {
@@ -102,6 +106,7 @@ export class Storage {
       branchIndex: {},
       processedCommentIds: [],
       sourceMessageIndex: {},
+      threadIndex: {},
     };
   }
 
@@ -117,6 +122,7 @@ export class Storage {
         branchIndex: loaded.branchIndex || {},
         processedCommentIds: loaded.processedCommentIds || [],
         sourceMessageIndex: loaded.sourceMessageIndex || {},
+        threadIndex: loaded.threadIndex || {},
       };
       console.log(`[Storage] Loaded ${this.data.processedMessageIds.length} processed message IDs`);
       console.log(`[Storage] Loaded ${Object.keys(this.data.workspaces).length} workspace records`);
@@ -131,6 +137,7 @@ export class Storage {
         branchIndex: {},
         processedCommentIds: [],
         sourceMessageIndex: {},
+        threadIndex: {},
       };
     }
   }
@@ -236,6 +243,12 @@ export class Storage {
         console.log(`[Storage] Removed source message index for ${workspace.sourceMessageId}`);
       }
 
+      // Clean up threadIndex
+      if (workspace.threadId && this.data.threadIndex[workspace.threadId] === messageId) {
+        delete this.data.threadIndex[workspace.threadId];
+        console.log(`[Storage] Removed thread index for ${workspace.threadId}`);
+      }
+
       delete this.data.workspaces[messageId];
       await this.save();
       console.log(`[Storage] Deleted workspace record for ${messageId}`);
@@ -305,5 +318,19 @@ export class Storage {
     this.data.sourceMessageIndex[sourceMessageId] = messageId;
     await this.save();
     console.log(`[Storage] Added source message index: ${sourceMessageId} -> ${messageId}`);
+  }
+
+  // Thread lookup for Discord feedback
+
+  getWorkspaceByThread(threadId: string): WorkspaceInfo | undefined {
+    const messageId = this.data.threadIndex[threadId];
+    if (!messageId) return undefined;
+    return this.data.workspaces[messageId];
+  }
+
+  async addThreadIndex(threadId: string, messageId: string): Promise<void> {
+    this.data.threadIndex[threadId] = messageId;
+    await this.save();
+    console.log(`[Storage] Added thread index: ${threadId} -> ${messageId}`);
   }
 }

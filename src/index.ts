@@ -3,7 +3,6 @@ import { DiscordBot, CodeRequest } from './discord';
 import { WorkspaceManager, Workspace } from './workspace';
 import { GitManager } from './git';
 import { GitLabClient } from './gitlab';
-import { GitLabMonitor, FeedbackRequest } from './gitlab/monitor';
 import { ClaudeOrchestrator } from './claude';
 import { Storage, SupabaseStorage, IStorage, WorkspaceInfo, WorkspaceStatus } from './storage';
 import path from 'path';
@@ -17,7 +16,6 @@ class AutoCode {
   private workspaceManager: WorkspaceManager;
   private gitManager: GitManager;
   private gitlabClient: GitLabClient;
-  private gitlabMonitor: GitLabMonitor;
   private claudeOrchestrator: ClaudeOrchestrator;
   private storage: IStorage;
   private activeRequests: number = 0;
@@ -53,20 +51,10 @@ class AutoCode {
         onIdeationStart: this.handleIdeationStart.bind(this),
         onIdeationResponse: this.handleIdeationResponse.bind(this),
         onPublicChannelApproval: this.handlePublicChannelApproval.bind(this),
+        onDiscordFeedback: this.handleDiscordFeedback.bind(this),
+        onDiscordValidation: this.handleDiscordValidation.bind(this),
       },
       storage
-    );
-
-    // Initialize GitLab monitor for MR feedback loop
-    this.gitlabMonitor = new GitLabMonitor(
-      this.gitlabClient,
-      this.storage,
-      {
-        onFeedbackReceived: this.handleFeedbackReceived.bind(this),
-        onValidationApproved: this.handleValidationApproved.bind(this),
-      },
-      config.gitlab.mrPollingInterval || 60000,
-      config.discord.approvedUsers
     );
   }
 
@@ -94,9 +82,10 @@ class AutoCode {
     // Filter out workspaces that are waiting for external events, not processing
     // - ideation_complete: waiting for approval emoji on Discord
     // - ideation_in_progress: waiting for user response in Discord thread
-    // - awaiting_validation: waiting for feedback/approval comments on GitLab MR
+    // - awaiting_validation: waiting for feedback/approval in Discord thread
+    // - mr_created: waiting for feedback/approval in Discord thread
     // Only resume workspaces that are actively being processed
-    const waitingStatuses = ['ideation_complete', 'ideation_in_progress', 'awaiting_validation'];
+    const waitingStatuses = ['ideation_complete', 'ideation_in_progress', 'awaiting_validation', 'mr_created'];
     const incompleteWorkspaces = allIncompleteWorkspaces.filter(ws => !waitingStatuses.includes(ws.status));
 
     const waitingWorkspaces = allIncompleteWorkspaces.filter(ws => waitingStatuses.includes(ws.status));
@@ -161,12 +150,8 @@ class AutoCode {
     // Update last scan timestamp
     await this.storage.updateLastScan();
 
-    // Start GitLab MR monitoring AFTER workspaces are loaded
-    // This ensures the first scan picks up any comments on resumed MRs
-    console.log('\n[AutoCode] Starting GitLab MR monitoring...');
-    await this.gitlabMonitor.startMonitoring();
-
     console.log('\n[AutoCode] Ready and waiting for new approved requests...');
+    console.log('[AutoCode] Feedback will be received via Discord threads (GitLab polling removed)');
   }
 
   private async handleIdeationStart(
@@ -195,6 +180,9 @@ class AutoCode {
         attempt: 1,
         threadId,
       });
+
+      // Add thread to index for quick lookup during feedback
+      await this.storage.addThreadIndex(threadId, messageId);
 
       // Initialize conversation with existing messages if available, otherwise just the initial message
       const initialConversation = existingMessages && existingMessages.length > 0
@@ -372,13 +360,30 @@ class AutoCode {
         return;
       }
 
+      // Generate a smart title for the conversation
+      console.log(`[AutoCode] Generating conversation title...`);
+      let conversationTitle: string | undefined;
+      try {
+        const generatedTitle = await this.claudeOrchestrator.generateConversationTitle(
+          this.config.workspacesDir,
+          content
+        );
+        if (generatedTitle) {
+          conversationTitle = generatedTitle;
+          console.log(`[AutoCode] Generated title: ${conversationTitle}`);
+        }
+      } catch (error) {
+        console.log(`[AutoCode] Could not generate title, will use fallback:`, error);
+      }
+
       // Create thread in private channel
       console.log(`[AutoCode] Creating thread in private channel...`);
       const { threadId, starterMessageId } = await this.discord.createThreadInPrivateChannel(
         content,
         author,
         sourceChannelId,
-        threadMessages
+        threadMessages,
+        conversationTitle
       );
 
       console.log(`[AutoCode] Thread created: ${threadId}, starter message: ${starterMessageId}`);
@@ -440,6 +445,9 @@ class AutoCode {
         sourceMessageId,
         sourceChannelId,
       });
+
+      // Add thread to index for quick lookup during feedback
+      await this.storage.addThreadIndex(threadId, messageId);
 
       // If source message provided, add to index
       if (sourceMessageId) {
@@ -544,66 +552,17 @@ class AutoCode {
     this.processNextRequests();
   }
 
-  private async handleFeedbackReceived(feedback: FeedbackRequest): Promise<void> {
-    console.log(`[AutoCode] Feedback received for workspace ${feedback.messageId} from ${feedback.author}`);
-    console.log(`[AutoCode] Feedback: ${feedback.feedback.substring(0, 200)}...`);
-
-    const workspace = this.storage.getWorkspace(feedback.messageId);
-    if (!workspace) {
-      console.error(`[AutoCode] Workspace not found for ${feedback.messageId}`);
-      try {
-        await this.gitlabClient.addMRComment(
-          feedback.mrIid,
-          '⚠️ Workspace no longer exists, cannot apply feedback.'
-        );
-      } catch (error) {
-        console.error('[AutoCode] Failed to reply to MR:', error);
-      }
-      return;
-    }
-
-    // Save feedback to file
-    const feedbackFilePath = path.join(workspace.workspacePath, `feedback-${Date.now()}.md`);
-    await fs.writeFile(
-      feedbackFilePath,
-      `# Feedback from ${feedback.author}\n\nReceived: ${feedback.timestamp.toISOString()}\n\n${feedback.feedback}`,
-      'utf-8'
-    );
-
-    // Update workspace status and reset attempt counter for new feedback cycle
-    await this.storage.updateWorkspaceStatus(feedback.messageId, 'mr_feedback_received', {
-      lastFeedbackAt: Date.now(),
-      feedbackCount: (workspace.feedbackCount || 0) + 1,
-      attempt: 1, // Reset attempt counter for new feedback cycle
-    });
-
-    await this.notifyThread(feedback.messageId,
-      `💬 **Feedback reçu**\n\n` +
-      `Je prends en compte le retour de ${feedback.author}.\n` +
-      `Je vais implémenter les modifications et mettre à jour la MR.`
-    );
-
-    // Create CodeRequest for re-processing
-    const feedbackRequest: CodeRequest = {
-      id: feedback.messageId,
-      messageId: feedback.messageId,
-      channelId: '',
-      content: feedback.feedback,
-      author: feedback.author,
-      approvedBy: feedback.author,
-      timestamp: feedback.timestamp,
-    };
-
-    // Add to queue
-    this.requestQueue.push(feedbackRequest);
-    console.log(`[AutoCode] Feedback request ${feedback.messageId} added to queue`);
-
-    // Try to process
-    this.processNextRequests();
-  }
-
-  private async handleValidationApproved(messageId: string): Promise<void> {
-    console.log(`[AutoCode] Validation approved for workspace ${messageId}`);
+  /**
+   * Handle feedback received via Discord thread (replaces GitLab MR polling)
+   */
+  private async handleDiscordFeedback(
+    messageId: string,
+    threadId: string,
+    feedback: string,
+    author: string
+  ): Promise<void> {
+    console.log(`[AutoCode] Discord feedback received for workspace ${messageId} from ${author}`);
+    console.log(`[AutoCode] Feedback: ${feedback.substring(0, 200)}...`);
 
     const workspace = this.storage.getWorkspace(messageId);
     if (!workspace) {
@@ -611,11 +570,89 @@ class AutoCode {
       return;
     }
 
+    // Check if workspace is in a state that can receive feedback
+    if (!['mr_created', 'awaiting_validation'].includes(workspace.status)) {
+      console.log(`[AutoCode] Workspace ${messageId} is in status ${workspace.status}, ignoring feedback`);
+      return;
+    }
+
+    // Save feedback to file (if workspace directory exists)
+    if (workspace.workspacePath) {
+      try {
+        const feedbackFilePath = path.join(workspace.workspacePath, `feedback-${Date.now()}.md`);
+        await fs.writeFile(
+          feedbackFilePath,
+          `# Feedback from ${author}\n\nReceived: ${new Date().toISOString()}\n\n${feedback}`,
+          'utf-8'
+        );
+      } catch (error) {
+        console.warn(`[AutoCode] Could not save feedback file: ${error}`);
+        // Continue anyway - feedback is in the request content
+      }
+    }
+
+    // Update workspace status and reset attempt counter for new feedback cycle
+    await this.storage.updateWorkspaceStatus(messageId, 'mr_feedback_received', {
+      lastFeedbackAt: Date.now(),
+      feedbackCount: (workspace.feedbackCount || 0) + 1,
+      attempt: 1, // Reset attempt counter for new feedback cycle
+    });
+
+    await this.notifyThread(messageId,
+      `💬 **Feedback reçu**\n\n` +
+      `Je prends en compte le retour de ${author}.\n` +
+      `Je vais implémenter les modifications et mettre à jour la MR.`
+    );
+
+    // Create CodeRequest for re-processing
+    const feedbackRequest: CodeRequest = {
+      id: messageId,
+      messageId: messageId,
+      channelId: '',
+      content: feedback,
+      author: author,
+      approvedBy: author,
+      timestamp: new Date(),
+    };
+
+    // Add to queue
+    this.requestQueue.push(feedbackRequest);
+    console.log(`[AutoCode] Discord feedback request ${messageId} added to queue`);
+
+    // Try to process
+    this.processNextRequests();
+  }
+
+  /**
+   * Handle validation/approval received via Discord thread (replaces GitLab MR polling)
+   */
+  private async handleDiscordValidation(messageId: string): Promise<void> {
+    console.log(`[AutoCode] Discord validation approved for workspace ${messageId}`);
+
+    const workspace = this.storage.getWorkspace(messageId);
+    if (!workspace) {
+      console.error(`[AutoCode] Workspace not found for ${messageId}`);
+      return;
+    }
+
+    // Check if workspace is in a state that can be validated
+    if (!['mr_created', 'awaiting_validation'].includes(workspace.status)) {
+      console.log(`[AutoCode] Workspace ${messageId} is in status ${workspace.status}, ignoring validation`);
+      return;
+    }
+
     // Mark as completed
     await this.storage.updateWorkspaceStatus(messageId, 'completed');
     await this.storage.markProcessed(messageId);
 
-    console.log(`[AutoCode] ✅ Workspace ${messageId} completed and validated`);
+    // Notify in thread
+    await this.notifyThread(messageId,
+      `✅ **Validation confirmée !**\n\n` +
+      `Le travail sur cette demande est terminé.\n` +
+      `La Merge Request peut maintenant être fusionnée.`
+    );
+
+    console.log(`[AutoCode] ✅ Workspace ${messageId} completed and validated via Discord`);
   }
 
   private processNextRequests(): void {
