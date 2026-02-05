@@ -68,6 +68,7 @@ class AutoCode {
         onDiscordValidation: this.handleDiscordValidation.bind(this),
         onBaseBranchResponse: this.handleBaseBranchResponse.bind(this),
         onIdeationApproved: this.handleIdeationApproved.bind(this),
+        onThreadDeleted: this.handleThreadDeleted.bind(this),
       },
       storage
     );
@@ -88,6 +89,9 @@ class AutoCode {
 
     // Connect to Discord
     await this.discord.connect(this.config.discord.botToken);
+
+    // Check for orphaned threads (deleted on Discord but still in storage)
+    await this.cleanupOrphanedThreads();
 
     // Check for incomplete workspaces from previous runs BEFORE starting monitor
     // This ensures the monitor can scan for comments on resumed workspaces
@@ -299,6 +303,141 @@ class AutoCode {
         console.error(`${logPrefix} ❌ Error resuming MR feedback:`, error);
       }
     }
+  }
+
+  /**
+   * Handle thread deletion - cleanup workspace, local files, and remote branch
+   */
+  private async handleThreadDeleted(threadId: string): Promise<void> {
+    const logPrefix = `[AutoCode][handleThreadDeleted][${threadId}]`;
+    console.log(`${logPrefix} 🗑️ Thread deleted, starting cleanup...`);
+
+    const workspace = this.storage.getWorkspaceByThread(threadId);
+    if (!workspace) {
+      console.log(`${logPrefix} No workspace found for thread, nothing to cleanup`);
+      return;
+    }
+
+    await this.cleanupWorkspace(workspace.messageId, logPrefix);
+  }
+
+  /**
+   * Cleanup a workspace completely:
+   * 1. Delete remote branch (if exists)
+   * 2. Delete local workspace files
+   * 3. Delete from storage (Supabase/JSON)
+   */
+  private async cleanupWorkspace(messageId: string, logPrefix: string = '[AutoCode][cleanup]'): Promise<void> {
+    const workspace = this.storage.getWorkspace(messageId);
+    if (!workspace) {
+      console.log(`${logPrefix} No workspace found for ${messageId}`);
+      return;
+    }
+
+    console.log(`${logPrefix} Cleaning up workspace ${messageId}...`);
+    console.log(`${logPrefix}   Branch: ${workspace.branchName}`);
+    console.log(`${logPrefix}   Workspace path: ${workspace.workspacePath || 'N/A'}`);
+    console.log(`${logPrefix}   Status: ${workspace.status}`);
+
+    // 1. Delete remote branch (if it exists)
+    if (workspace.branchName) {
+      try {
+        console.log(`${logPrefix} Deleting remote branch ${workspace.branchName}...`);
+        const deleted = await this.gitManager.deleteRemoteBranch(workspace.branchName);
+        if (deleted) {
+          console.log(`${logPrefix} ✅ Remote branch deleted`);
+        } else {
+          console.log(`${logPrefix} Branch did not exist on remote or already deleted`);
+        }
+      } catch (error) {
+        console.error(`${logPrefix} ❌ Error deleting remote branch:`, error);
+        // Continue with cleanup even if branch deletion fails
+      }
+    }
+
+    // 2. Delete local workspace files
+    if (workspace.workspacePath) {
+      try {
+        console.log(`${logPrefix} Deleting local workspace at ${workspace.workspacePath}...`);
+        await fs.rm(workspace.workspacePath, { recursive: true, force: true });
+        console.log(`${logPrefix} ✅ Local workspace deleted`);
+      } catch (error) {
+        console.error(`${logPrefix} ❌ Error deleting local workspace:`, error);
+        // Continue with cleanup even if local deletion fails
+      }
+    }
+
+    // 3. Remove worktree from git (if it was registered)
+    if (workspace.workspacePath) {
+      try {
+        await this.gitManager.pruneWorktrees();
+        console.log(`${logPrefix} ✅ Worktrees pruned`);
+      } catch (error) {
+        // Ignore worktree prune errors
+      }
+    }
+
+    // 4. Delete from storage (this also cleans up all indexes)
+    try {
+      console.log(`${logPrefix} Deleting workspace from storage...`);
+      await this.storage.deleteWorkspace(messageId);
+      console.log(`${logPrefix} ✅ Workspace deleted from storage`);
+    } catch (error) {
+      console.error(`${logPrefix} ❌ Error deleting workspace from storage:`, error);
+    }
+
+    // 5. Remove from pending branch selections if present
+    if (workspace.threadId && this.pendingBranchSelections.has(workspace.threadId)) {
+      this.pendingBranchSelections.delete(workspace.threadId);
+      console.log(`${logPrefix} ✅ Removed from pending branch selections`);
+    }
+
+    console.log(`${logPrefix} 🎉 Cleanup complete for ${messageId}`);
+  }
+
+  /**
+   * Check all tracked threads at startup and cleanup any that were deleted while bot was offline
+   */
+  private async cleanupOrphanedThreads(): Promise<void> {
+    const logPrefix = `[AutoCode][cleanupOrphanedThreads]`;
+    console.log(`\n${logPrefix} Checking for orphaned threads...`);
+
+    // Get all workspaces with thread IDs
+    const allWorkspaces = this.storage.getAllWorkspaces();
+    const workspacesWithThreads = allWorkspaces.filter(ws => ws.threadId);
+
+    if (workspacesWithThreads.length === 0) {
+      console.log(`${logPrefix} No workspaces with threads to check`);
+      return;
+    }
+
+    console.log(`${logPrefix} Checking ${workspacesWithThreads.length} workspace(s) with threads...`);
+
+    const threadIds = workspacesWithThreads.map(ws => ws.threadId!);
+    const deletedThreadIds = await this.discord.getDeletedThreadIds(threadIds);
+
+    if (deletedThreadIds.length === 0) {
+      console.log(`${logPrefix} All threads still exist, no cleanup needed`);
+      return;
+    }
+
+    console.log(`${logPrefix} Found ${deletedThreadIds.length} orphaned thread(s), cleaning up...`);
+
+    for (const threadId of deletedThreadIds) {
+      const workspace = this.storage.getWorkspaceByThread(threadId);
+      if (workspace) {
+        console.log(`${logPrefix} Cleaning up workspace ${workspace.messageId} (thread ${threadId} was deleted)`);
+        await this.cleanupWorkspace(workspace.messageId, `${logPrefix}[${threadId}]`);
+      }
+
+      // Also cleanup pending branch selections for this thread
+      if (this.pendingBranchSelections.has(threadId)) {
+        this.pendingBranchSelections.delete(threadId);
+        console.log(`${logPrefix} Removed pending branch selection for thread ${threadId}`);
+      }
+    }
+
+    console.log(`${logPrefix} Orphaned thread cleanup complete`);
   }
 
   /**

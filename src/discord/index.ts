@@ -42,6 +42,7 @@ export interface DiscordBotEvents {
   onDiscordValidation?: (messageId: string) => Promise<void>;
   onBaseBranchResponse?: (messageId: string, threadId: string, baseBranch: string, author: string) => Promise<void>;
   onIdeationApproved?: (messageId: string, threadId: string) => Promise<void>;
+  onThreadDeleted?: (threadId: string) => Promise<void>;
 }
 
 export class DiscordBot {
@@ -95,6 +96,10 @@ export class DiscordBot {
 
     this.client.on('messageCreate', async (message) => {
       await this.handleNewMessage(message);
+    });
+
+    this.client.on('threadDelete', async (thread) => {
+      await this.handleThreadDelete(thread);
     });
 
     this.client.on('error', (error) => {
@@ -1352,6 +1357,79 @@ export class DiscordBot {
     approvedRequests.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
     console.log(`[Discord] Text channel scan complete. Found ${approvedRequests.length} approved requests.`);
     return approvedRequests;
+  }
+
+  /**
+   * Handle thread deletion event
+   * Triggers cleanup when a thread is deleted from Discord
+   */
+  private async handleThreadDelete(thread: ThreadChannel): Promise<void> {
+    const logPrefix = `[Discord][handleThreadDelete][${thread.id}]`;
+    try {
+      const parentChannelId = thread.parentId;
+
+      // Only handle threads in our monitored channels (private or public)
+      const isInPrivateChannel = parentChannelId ? this.privateChannelIds.includes(parentChannelId) : false;
+      const isInPublicChannel = parentChannelId ? this.channelIds.includes(parentChannelId) : false;
+
+      if (!isInPrivateChannel && !isInPublicChannel) {
+        return;
+      }
+
+      console.log(`${logPrefix} 🗑️ Thread deleted: ${thread.name || thread.id}`);
+
+      // Check if we have a workspace for this thread
+      const workspace = this.storage.getWorkspaceByThread(thread.id);
+      if (workspace) {
+        console.log(`${logPrefix} Found workspace ${workspace.messageId} for deleted thread, triggering cleanup`);
+        if (this.events.onThreadDeleted) {
+          await this.events.onThreadDeleted(thread.id);
+        }
+      } else {
+        console.log(`${logPrefix} No workspace found for deleted thread`);
+      }
+    } catch (error) {
+      console.error(`${logPrefix} ❌ Error handling thread deletion:`, error);
+    }
+  }
+
+  /**
+   * Check if a thread exists on Discord
+   * Returns true if thread exists, false if deleted or not found
+   */
+  async threadExists(threadId: string): Promise<boolean> {
+    try {
+      const channel = await this.client.channels.fetch(threadId);
+      return channel !== null && channel.isThread();
+    } catch (error: unknown) {
+      // 10003 = Unknown Channel (deleted)
+      // 10008 = Unknown Message
+      if (error instanceof Error && 'code' in error) {
+        const discordError = error as { code: number };
+        if (discordError.code === 10003 || discordError.code === 10008) {
+          return false;
+        }
+      }
+      console.error(`[Discord] Error checking if thread ${threadId} exists:`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Get all thread IDs that we're tracking and verify which ones still exist
+   * Returns a list of thread IDs that no longer exist on Discord
+   */
+  async getDeletedThreadIds(trackedThreadIds: string[]): Promise<string[]> {
+    const deletedThreadIds: string[] = [];
+
+    for (const threadId of trackedThreadIds) {
+      const exists = await this.threadExists(threadId);
+      if (!exists) {
+        deletedThreadIds.push(threadId);
+      }
+    }
+
+    return deletedThreadIds;
   }
 
   async disconnect(): Promise<void> {

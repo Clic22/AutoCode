@@ -397,6 +397,39 @@ export class GitManager implements GitOperations {
     }
   }
 
+  /**
+   * Delete a branch from the remote origin
+   * Used for cleanup when a Discord thread is deleted
+   */
+  async deleteRemoteBranch(branchName: string): Promise<boolean> {
+    return this.baseRepoMutex.withLock(async () => {
+      try {
+        const git = simpleGit(this.baseRepoPath);
+
+        // First check if the branch exists on remote
+        await git.fetch(['origin', '--prune']);
+        const remoteBranches = await git.branch(['-r']);
+
+        if (!remoteBranches.all.includes(`origin/${branchName}`)) {
+          console.log(`[Git] Remote branch ${branchName} does not exist, nothing to delete`);
+          return false;
+        }
+
+        console.log(`[Git] Deleting remote branch: ${branchName}`);
+        await git.raw(['push', 'origin', '--delete', branchName]);
+        console.log(`[Git] Remote branch ${branchName} deleted successfully`);
+
+        // Also delete local branch if it exists
+        await this.deleteBranchIfExists(git, branchName);
+
+        return true;
+      } catch (error) {
+        console.error(`[Git] Error deleting remote branch ${branchName}:`, error);
+        return false;
+      }
+    });
+  }
+
   async createBranch(repoPath: string, branchName: string): Promise<void> {
     // With worktree approach, the branch is already created
     // This method is kept for compatibility but does nothing
