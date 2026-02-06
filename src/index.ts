@@ -1214,6 +1214,11 @@ class AutoCode {
             } else if (workspaceInfo.branchName) {
               // Try to recover workspace from remote branch (e.g., when syncing across machines)
               console.log(`${getLogPrefix()} Workspace directory missing, trying to recover from remote branch...`);
+              // Save workspace info before try block (workspaceInfo may be set to undefined in some branches)
+              const savedBranchName = workspaceInfo.branchName;
+              const savedBaseBranch = workspaceInfo.baseBranch;
+              const savedMrUrl = workspaceInfo.mrUrl;
+              const savedStatus = workspaceInfo.status;
               try {
                 const remoteBranchExists = await this.gitManager.remoteBranchExists(workspaceInfo.branchName);
                 if (remoteBranchExists) {
@@ -1231,6 +1236,21 @@ class AutoCode {
                   workspaceInfo.repoPath = repoPath;
 
                   console.log(`${getLogPrefix()} Workspace recovered from remote branch`);
+                } else if (workspaceInfo.mrUrl) {
+                  // Branch not on remote but MR exists - recreate worktree with same branch name to preserve MR association
+                  console.log(`${getLogPrefix()} Branch not found on remote but MR exists, recreating with same branch name...`);
+                  workspace = await this.workspaceManager.create(request.id);
+                  branchName = workspaceInfo.branchName;
+                  repoPath = await this.gitManager.createWorktree(workspace, branchName, workspaceInfo.baseBranch);
+
+                  await this.storage.updateWorkspaceStatus(request.id, workspaceInfo.status, {
+                    workspacePath: workspace.path,
+                    repoPath: repoPath,
+                  });
+                  workspaceInfo.workspacePath = workspace.path;
+                  workspaceInfo.repoPath = repoPath;
+
+                  console.log(`${getLogPrefix()} Workspace recreated with original branch name`);
                 } else {
                   console.log(`${getLogPrefix()} Branch not found on remote, will recreate from scratch...`);
                   await this.storage.deleteWorkspace(request.id);
@@ -1239,9 +1259,32 @@ class AutoCode {
                 }
               } catch (error) {
                 console.error(`${getLogPrefix()} Error recovering workspace:`, error);
-                await this.storage.deleteWorkspace(request.id);
-                workspaceInfo = undefined;
-                branchName = '';
+                if (savedMrUrl) {
+                  // Recovery failed but MR exists - try to recreate with same branch name
+                  try {
+                    console.log(`${getLogPrefix()} Recovery failed but MR exists, recreating with same branch name...`);
+                    workspace = await this.workspaceManager.create(request.id);
+                    branchName = savedBranchName;
+                    repoPath = await this.gitManager.createWorktree(workspace, branchName, savedBaseBranch);
+
+                    await this.storage.updateWorkspaceStatus(request.id, savedStatus, {
+                      workspacePath: workspace.path,
+                      repoPath: repoPath,
+                    });
+                    workspaceInfo = this.storage.getWorkspace(request.id);
+
+                    console.log(`${getLogPrefix()} Workspace recreated with original branch name after recovery error`);
+                  } catch (recreateError) {
+                    console.error(`${getLogPrefix()} Failed to recreate workspace:`, recreateError);
+                    await this.storage.deleteWorkspace(request.id);
+                    workspaceInfo = undefined;
+                    branchName = '';
+                  }
+                } else {
+                  await this.storage.deleteWorkspace(request.id);
+                  workspaceInfo = undefined;
+                  branchName = '';
+                }
               }
             } else {
               console.log(`${getLogPrefix()} Workspace directory missing, will recreate...`);
