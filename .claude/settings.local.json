@@ -33,7 +33,8 @@
       "Bash(find:*)",
       "Bash(npx tsc:*)",
       "mcp__plugin_supabase_supabase__list_projects",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(ipconfig:*)"
     ]
   }
 }

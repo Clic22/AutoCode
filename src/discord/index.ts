@@ -39,7 +39,6 @@ export interface DiscordBotEvents {
     approvedBy: string
   ) => Promise<void>;
   onDiscordFeedback?: (messageId: string, threadId: string, feedback: string, author: string) => Promise<void>;
-  onDiscordValidation?: (messageId: string) => Promise<void>;
   onBaseBranchResponse?: (messageId: string, threadId: string, baseBranch: string, author: string) => Promise<void>;
   onIdeationApproved?: (messageId: string, threadId: string) => Promise<void>;
   onThreadDeleted?: (threadId: string) => Promise<void>;
@@ -217,29 +216,6 @@ export class DiscordBot {
       }
 
       // Handle PRIVATE channel approval
-      // First, check if this is a thread with an MR workspace (for validation approval)
-      if (channel.isThread()) {
-        const thread = channel as ThreadChannel;
-        let workspace = this.storage.getWorkspaceByThread(thread.id);
-
-        // If not found by thread, try by starter message
-        if (!workspace) {
-          const starterMessage = await thread.fetchStarterMessage();
-          if (starterMessage) {
-            workspace = this.storage.getWorkspace(starterMessage.id);
-          }
-        }
-
-        // If workspace is in MR phase, this is a validation approval
-        if (workspace && (workspace.status === 'mr_created' || workspace.status === 'awaiting_validation')) {
-          console.log(`[Discord] ✅ Validation emoji detected for workspace ${workspace.messageId} by ${username}`);
-          if (this.events.onDiscordValidation) {
-            await this.events.onDiscordValidation(workspace.messageId);
-          }
-          return;
-        }
-      }
-
       // Standard flow: ideation complete -> implementation
       // (NEW FLOW: base branch is selected at the beginning, not after ideation)
 
@@ -429,30 +405,11 @@ export class DiscordBot {
   private async handleMRFeedback(message: Message, messageId: string, threadId: string, author: string): Promise<void> {
     const content = message.content.trim();
 
-    // Check for approval keywords
-    const approvalKeywords = ['approve', 'approved', 'validated', 'done', 'lgtm', 'ok', '👍', '✅'];
-    const contentLower = content.toLowerCase();
-
-    const isApproval = approvalKeywords.some(keyword => {
-      // Match whole word only for short keywords to avoid false positives
-      if (keyword.length <= 4) {
-        const regex = new RegExp(`\\b${keyword}\\b`, 'i');
-        return regex.test(contentLower);
-      }
-      return contentLower.includes(keyword);
-    });
-
-    if (isApproval) {
-      console.log(`[Discord] Validation detected from ${author} in thread ${threadId}`);
-      if (this.events.onDiscordValidation) {
-        await this.events.onDiscordValidation(messageId);
-      }
-    } else {
-      console.log(`[Discord] Feedback received from ${author} in thread ${threadId}`);
-      console.log(`[Discord] Feedback: ${content.substring(0, 100)}...`);
-      if (this.events.onDiscordFeedback) {
-        await this.events.onDiscordFeedback(messageId, threadId, content, author);
-      }
+    // All messages are treated as feedback (approval is now handled via GitLab webhook on MR merge)
+    console.log(`[Discord] Feedback received from ${author} in thread ${threadId}`);
+    console.log(`[Discord] Feedback: ${content.substring(0, 100)}...`);
+    if (this.events.onDiscordFeedback) {
+      await this.events.onDiscordFeedback(messageId, threadId, content, author);
     }
   }
 

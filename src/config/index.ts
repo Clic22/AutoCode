@@ -16,7 +16,10 @@ export interface Config {
     token: string;
     repoUrl: string;
     projectId: string;
-    mrPollingInterval?: number;
+  };
+  webhook?: {
+    port: number;
+    secret: string;
   };
   workspacesDir: string;
   claudeCliPath: string;
@@ -69,6 +72,18 @@ export function loadConfig(): Config {
     };
   }
 
+  // Webhook configuration (optional)
+  const webhookPortRaw = process.env.GITLAB_WEBHOOK_PORT;
+  let webhookPort: number | undefined;
+  let webhookSecret: string | undefined;
+  if (webhookPortRaw) {
+    webhookPort = parseInt(webhookPortRaw, 10);
+    webhookSecret = process.env.GITLAB_WEBHOOK_SECRET;
+    if (!webhookSecret) {
+      throw new Error('GITLAB_WEBHOOK_SECRET is required when GITLAB_WEBHOOK_PORT is set');
+    }
+  }
+
   return {
     discord: {
       botToken: getEnvOrThrow('DISCORD_BOT_TOKEN'),
@@ -82,10 +97,11 @@ export function loadConfig(): Config {
       token: getEnvOrThrow('GITLAB_TOKEN'),
       repoUrl: process.env.GITLAB_REPO_URL || 'http://gitlab.totemmedia.com/Stephane/qtvghd.git',
       projectId: process.env.GITLAB_PROJECT_ID || 'Stephane/qtvghd',
-      mrPollingInterval: process.env.GITLAB_MR_POLLING_INTERVAL
-        ? parseInt(process.env.GITLAB_MR_POLLING_INTERVAL, 10)
-        : undefined,
     },
+    webhook: webhookPort ? {
+      port: webhookPort,
+      secret: webhookSecret!,
+    } : undefined,
     workspacesDir: path.resolve(process.env.WORKSPACES_DIR || './workspaces'),
     claudeCliPath: process.env.CLAUDE_CLI_PATH || 'claude',
     storageType,

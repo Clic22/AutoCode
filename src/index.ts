@@ -3,6 +3,7 @@ import { DiscordBot, CodeRequest } from './discord';
 import { WorkspaceManager, Workspace } from './workspace';
 import { GitManager } from './git';
 import { GitLabClient } from './gitlab';
+import { GitLabWebhookServer } from './gitlab/webhook';
 import { ClaudeOrchestrator } from './claude';
 import { Storage, SupabaseStorage, IStorage, WorkspaceInfo, WorkspaceStatus } from './storage';
 import path from 'path';
@@ -31,6 +32,7 @@ class AutoCode {
   private storage: IStorage;
   private activeRequests: number = 0;
   private requestQueue: CodeRequest[] = [];
+  private webhookServer: GitLabWebhookServer | null = null;
   // Cache for threads waiting for branch selection (not persisted)
   private pendingBranchSelections: Map<string, PendingBranchSelection> = new Map();
 
@@ -65,13 +67,24 @@ class AutoCode {
         onIdeationResponse: this.handleIdeationResponse.bind(this),
         onPublicChannelApproval: this.handlePublicChannelApproval.bind(this),
         onDiscordFeedback: this.handleDiscordFeedback.bind(this),
-        onDiscordValidation: this.handleDiscordValidation.bind(this),
         onBaseBranchResponse: this.handleBaseBranchResponse.bind(this),
         onIdeationApproved: this.handleIdeationApproved.bind(this),
         onThreadDeleted: this.handleThreadDeleted.bind(this),
       },
       storage
     );
+
+    // Initialize webhook server if configured
+    if (config.webhook) {
+      this.webhookServer = new GitLabWebhookServer(
+        config.webhook.port,
+        config.webhook.secret,
+        {
+          onMRMerged: this.handleMRMerged.bind(this),
+          onMRComment: this.handleMRComment.bind(this),
+        }
+      );
+    }
   }
 
   async start(): Promise<void> {
@@ -89,6 +102,11 @@ class AutoCode {
 
     // Connect to Discord
     await this.discord.connect(this.config.discord.botToken);
+
+    // Start webhook server if configured
+    if (this.webhookServer) {
+      await this.webhookServer.start();
+    }
 
     // Check for orphaned threads (deleted on Discord but still in storage)
     await this.cleanupOrphanedThreads();
@@ -273,29 +291,11 @@ class AutoCode {
         console.log(`${logPrefix} Last message from: ${lastMessage.authorUsername} (bot: ${lastMessage.isFromBot})`);
 
         if (!lastMessage.isFromBot) {
-          // Last message is from a user - check if it's approval or feedback
+          // Last message is from a user - treat as feedback (approval is now handled via GitLab webhook on MR merge)
           const content = lastMessage.content.trim();
-          const contentLower = content.toLowerCase();
-
-          // Check for approval keywords
-          const approvalKeywords = ['approve', 'approved', 'validated', 'done', 'lgtm', 'ok', '👍', '✅'];
-          const isApproval = approvalKeywords.some(keyword => {
-            if (keyword.length <= 4) {
-              const regex = new RegExp(`\\b${keyword}\\b`, 'i');
-              return regex.test(contentLower);
-            }
-            return contentLower.includes(keyword);
-          });
-
-          if (isApproval) {
-            console.log(`${logPrefix} 🔄 Resuming - validation pending from ${lastMessage.authorUsername}`);
-            await this.handleDiscordValidation(ws.messageId);
-            console.log(`${logPrefix} ✅ Validation processed successfully`);
-          } else {
-            console.log(`${logPrefix} 🔄 Resuming - feedback pending: "${content.substring(0, 50)}..."`);
-            await this.handleDiscordFeedback(ws.messageId, ws.threadId, content, lastMessage.authorUsername);
-            console.log(`${logPrefix} ✅ Feedback processed successfully`);
-          }
+          console.log(`${logPrefix} 🔄 Resuming - feedback pending: "${content.substring(0, 50)}..."`);
+          await this.handleDiscordFeedback(ws.messageId, ws.threadId!, content, lastMessage.authorUsername);
+          console.log(`${logPrefix} ✅ Feedback processed successfully`);
         } else {
           console.log(`${logPrefix} ⏸️ Last message is from bot, waiting for user feedback`);
         }
@@ -801,20 +801,29 @@ class AutoCode {
   }
 
   /**
-   * Handle validation/approval received via Discord thread (replaces GitLab MR polling)
+   * Handle MR merged event from GitLab webhook
    */
-  private async handleDiscordValidation(messageId: string): Promise<void> {
-    console.log(`[AutoCode] Discord validation approved for workspace ${messageId}`);
+  private async handleMRMerged(mrUrl: string, sourceBranch: string, mrIid: number): Promise<void> {
+    const logPrefix = `[AutoCode][handleMRMerged]`;
+    console.log(`${logPrefix} MR merged: !${mrIid} (${sourceBranch}) - ${mrUrl}`);
 
-    const workspace = this.storage.getWorkspace(messageId);
+    // Find workspace by MR URL first, then fallback to branch name
+    let workspace = this.storage.getWorkspaceByMrUrl(mrUrl);
     if (!workspace) {
-      console.error(`[AutoCode] Workspace not found for ${messageId}`);
+      workspace = this.storage.getWorkspaceByBranch(sourceBranch);
+    }
+
+    if (!workspace) {
+      console.log(`${logPrefix} No workspace found for MR ${mrUrl} or branch ${sourceBranch}, ignoring`);
       return;
     }
 
-    // Check if workspace is in a state that can be validated
+    const messageId = workspace.messageId;
+    console.log(`${logPrefix} Found workspace ${messageId} (status: ${workspace.status})`);
+
+    // Check if workspace is in a state that can be completed
     if (!['mr_created', 'awaiting_validation'].includes(workspace.status)) {
-      console.log(`[AutoCode] Workspace ${messageId} is in status ${workspace.status}, ignoring validation`);
+      console.log(`${logPrefix} Workspace ${messageId} is in status ${workspace.status}, ignoring`);
       return;
     }
 
@@ -822,14 +831,44 @@ class AutoCode {
     await this.storage.updateWorkspaceStatus(messageId, 'completed');
     await this.storage.markProcessed(messageId);
 
-    // Notify in thread
+    // Notify BEFORE cleanup (cleanup removes workspace from storage, losing threadId)
     await this.notifyThread(messageId,
-      `✅ **Validation confirmée !**\n\n` +
-      `Le travail sur cette demande est terminé.\n` +
-      `La Merge Request peut maintenant être fusionnée.`
+      `✅ **MR fusionnée !**\n\n` +
+      `La Merge Request !${mrIid} a été fusionnée sur GitLab.\n` +
+      `Nettoyage du workspace en cours...`
     );
 
-    console.log(`[AutoCode] ✅ Workspace ${messageId} completed and validated via Discord`);
+    // Cleanup workspace (worktree, remote branch, storage)
+    await this.cleanupWorkspace(messageId, logPrefix);
+
+    console.log(`${logPrefix} ✅ Workspace ${messageId} completed and cleaned up after MR merge`);
+  }
+
+  /**
+   * Handle MR comment event from GitLab webhook - forward to Discord thread
+   */
+  private async handleMRComment(mrUrl: string, sourceBranch: string, mrIid: number, author: string, comment: string): Promise<void> {
+    const logPrefix = `[AutoCode][handleMRComment]`;
+    console.log(`${logPrefix} Comment by ${author} on !${mrIid} (${sourceBranch})`);
+
+    // Find workspace by MR URL first, then fallback to branch name
+    let workspace = this.storage.getWorkspaceByMrUrl(mrUrl);
+    if (!workspace) {
+      workspace = this.storage.getWorkspaceByBranch(sourceBranch);
+    }
+
+    if (!workspace) {
+      console.log(`${logPrefix} No workspace found for MR ${mrUrl} or branch ${sourceBranch}, ignoring`);
+      return;
+    }
+
+    console.log(`${logPrefix} Found workspace ${workspace.messageId} (status: ${workspace.status})`);
+
+    await this.notifyThread(workspace.messageId,
+      `💬 **Commentaire GitLab** de **${author}** sur !${mrIid} :\n\n${comment}`
+    );
+
+    console.log(`${logPrefix} Comment forwarded to Discord thread`);
   }
 
   /**
@@ -1489,8 +1528,8 @@ ${testChecklist}`,
         `🔗 **Lien:** ${mrResult.webUrl}\n\n` +
         `Vous pouvez maintenant:\n` +
         `• Consulter les changements sur GitLab\n` +
-        `• Laisser des commentaires si modifications nécessaires\n` +
-        `• Approuver quand tout est bon`
+        `• Laisser des commentaires ici si modifications nécessaires\n` +
+        `• Merger la MR sur GitLab quand tout est bon`
       );
 
       // Add MR to indexes for feedback loop
@@ -1803,6 +1842,9 @@ Do NOT repeat the same mistakes.
 
   async stop(): Promise<void> {
     console.log('[AutoCode] Shutting down...');
+    if (this.webhookServer) {
+      await this.webhookServer.stop();
+    }
     await this.discord.disconnect();
     console.log('[AutoCode] Shutdown complete');
   }
