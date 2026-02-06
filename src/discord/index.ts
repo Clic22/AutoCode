@@ -391,6 +391,9 @@ export class DiscordBot {
       } else if (workspace.status === 'mr_created' || workspace.status === 'awaiting_validation') {
         console.log(`${logPrefix} 📝 Routing to handleMRFeedback...`);
         await this.handleMRFeedback(message, workspace.messageId, thread.id, username);
+      } else if (workspace.status === 'failed') {
+        console.log(`${logPrefix} 🔄 Routing to handleRetryRequest (workspace failed)...`);
+        await this.handleRetryRequest(message, workspace.messageId, thread.id, username);
       } else {
         console.log(`${logPrefix} ⏭️ Workspace status ${workspace.status} not handled, ignoring`);
       }
@@ -408,6 +411,20 @@ export class DiscordBot {
     // All messages are treated as feedback (approval is now handled via GitLab webhook on MR merge)
     console.log(`[Discord] Feedback received from ${author} in thread ${threadId}`);
     console.log(`[Discord] Feedback: ${content.substring(0, 100)}...`);
+    if (this.events.onDiscordFeedback) {
+      await this.events.onDiscordFeedback(messageId, threadId, content, author);
+    }
+  }
+
+  /**
+   * Handle retry request for a failed workspace
+   * Requeues the workspace for processing via onDiscordFeedback
+   */
+  private async handleRetryRequest(message: Message, messageId: string, threadId: string, author: string): Promise<void> {
+    const content = message.content.trim();
+    console.log(`[Discord] Retry request from ${author} in thread ${threadId} for failed workspace ${messageId}`);
+    console.log(`[Discord] Message: ${content.substring(0, 100)}...`);
+
     if (this.events.onDiscordFeedback) {
       await this.events.onDiscordFeedback(messageId, threadId, content, author);
     }

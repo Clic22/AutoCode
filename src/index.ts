@@ -166,6 +166,29 @@ class AutoCode {
       }
     }
 
+    // Notify failed workspaces at startup (don't auto-retry to avoid infinite loops)
+    const failedWorkspaces = this.storage.getWorkspacesInStatus('failed');
+    if (failedWorkspaces.length > 0) {
+      console.log(`[AutoCode] Found ${failedWorkspaces.length} failed workspace(s), notifying threads...`);
+      for (const ws of failedWorkspaces) {
+        if (ws.threadId) {
+          try {
+            await this.discord.postToThread(ws.threadId,
+              `🔄 **Bot redémarré**\n\n` +
+              `Ce workspace avait échoué avec l'erreur :\n` +
+              `\`\`\`\n${ws.lastError || 'Erreur inconnue'}\n\`\`\`\n\n` +
+              `Envoyez un message dans ce thread pour relancer le traitement.`
+            );
+            console.log(`  - ${ws.messageId}: notified thread ${ws.threadId}`);
+          } catch (error) {
+            console.error(`  - ${ws.messageId}: failed to notify thread ${ws.threadId}:`, error);
+          }
+        } else {
+          console.log(`  - ${ws.messageId}: no thread to notify`);
+        }
+      }
+    }
+
     // Scan channel for existing approved messages
     console.log('\n[AutoCode] Scanning for pending approved requests...');
     const pendingRequests = await this.discord.scanChannelForApprovedMessages();
@@ -298,6 +321,14 @@ class AutoCode {
           console.log(`${logPrefix} ✅ Feedback processed successfully`);
         } else {
           console.log(`${logPrefix} ⏸️ Last message is from bot, waiting for user feedback`);
+          // Notify the user that the bot is back online and listening
+          try {
+            await this.discord.postToThread(ws.threadId!,
+              `🔄 **Bot redémarré** - Je suis de nouveau en ligne et j'écoute vos retours sur cette MR.`
+            );
+          } catch (error) {
+            console.error(`${logPrefix} Failed to send restart notification:`, error);
+          }
         }
       } catch (error) {
         console.error(`${logPrefix} ❌ Error resuming MR feedback:`, error);
@@ -748,7 +779,7 @@ class AutoCode {
     }
 
     // Check if workspace is in a state that can receive feedback
-    if (!['mr_created', 'awaiting_validation'].includes(workspace.status)) {
+    if (!['mr_created', 'awaiting_validation', 'failed'].includes(workspace.status)) {
       console.log(`[AutoCode] Workspace ${messageId} is in status ${workspace.status}, ignoring feedback`);
       return;
     }
@@ -768,18 +799,35 @@ class AutoCode {
       }
     }
 
-    // Update workspace status and reset attempt counter for new feedback cycle
-    await this.storage.updateWorkspaceStatus(messageId, 'mr_feedback_received', {
-      lastFeedbackAt: Date.now(),
-      feedbackCount: (workspace.feedbackCount || 0) + 1,
-      attempt: 1, // Reset attempt counter for new feedback cycle
-    });
+    // Determine the right status based on current workspace state
+    if (workspace.status === 'failed') {
+      // Retry from failed: reset to mr_feedback_received if MR exists, otherwise created
+      const retryStatus = workspace.mrUrl ? 'mr_feedback_received' : 'created';
+      await this.storage.updateWorkspaceStatus(messageId, retryStatus, {
+        lastFeedbackAt: Date.now(),
+        feedbackCount: (workspace.feedbackCount || 0) + 1,
+        attempt: 1, // Reset attempt counter for retry
+      });
 
-    await this.notifyThread(messageId,
-      `💬 **Feedback reçu**\n\n` +
-      `Je prends en compte le retour de ${author}.\n` +
-      `Je vais implémenter les modifications et mettre à jour la MR.`
-    );
+      await this.notifyThread(messageId,
+        `🔄 **Relance du traitement**\n\n` +
+        `Je reprends le traitement suite à votre message.\n` +
+        `${workspace.mrUrl ? 'Je vais mettre à jour la MR existante.' : 'Je vais reprendre depuis le début.'}`
+      );
+    } else {
+      // Normal feedback flow (mr_created / awaiting_validation)
+      await this.storage.updateWorkspaceStatus(messageId, 'mr_feedback_received', {
+        lastFeedbackAt: Date.now(),
+        feedbackCount: (workspace.feedbackCount || 0) + 1,
+        attempt: 1, // Reset attempt counter for new feedback cycle
+      });
+
+      await this.notifyThread(messageId,
+        `💬 **Feedback reçu**\n\n` +
+        `Je prends en compte le retour de ${author}.\n` +
+        `Je vais implémenter les modifications et mettre à jour la MR.`
+      );
+    }
 
     // Create CodeRequest for re-processing
     const feedbackRequest: CodeRequest = {
@@ -1224,16 +1272,13 @@ class AutoCode {
         });
       }
 
-      // Discord notification disabled for now
-      // try {
-      //   await this.discord.replyToMessage(
-      //     request.channelId,
-      //     request.messageId,
-      //     `❌ AutoCode encountered an error while processing this request:\n\`\`\`\n${error instanceof Error ? error.message : 'Unknown error'}\n\`\`\``
-      //   );
-      // } catch (discordError) {
-      //   console.error('[AutoCode] Failed to notify Discord of error:', discordError);
-      // }
+      // Notify the Discord thread about the failure
+      await this.notifyThread(request.id,
+        `❌ **Erreur lors du traitement**\n\n` +
+        `Une erreur est survenue :\n` +
+        `\`\`\`\n${error instanceof Error ? error.message : 'Unknown error'}\n\`\`\`\n\n` +
+        `Vous pouvez relancer le traitement en envoyant un message dans ce thread.`
+      );
     }
   }
 
