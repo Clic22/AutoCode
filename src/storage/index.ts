@@ -19,7 +19,7 @@ export interface IStorage {
   updateWorkspaceStatus(
     messageId: string,
     status: WorkspaceStatus,
-    extra?: Partial<Pick<WorkspaceInfo, 'developmentPrompt' | 'lastError' | 'mrUrl' | 'attempt' | 'lastFeedbackAt' | 'feedbackCount' | 'threadId' | 'ideationConversation' | 'lastIdeationTimestamp' | 'workspacePath' | 'repoPath' | 'baseBranch'>>
+    extra?: Partial<Pick<WorkspaceInfo, 'developmentPrompt' | 'lastError' | 'mrUrl' | 'attempt' | 'lastFeedbackAt' | 'feedbackCount' | 'threadId' | 'ideationConversation' | 'lastIdeationTimestamp' | 'workspacePath' | 'repoPath' | 'baseBranch' | 'statusBeforeFailure'>>
   ): Promise<void>;
   deleteWorkspace(messageId: string): Promise<void>;
   getIncompleteWorkspaces(): WorkspaceInfo[];
@@ -68,6 +68,7 @@ export interface WorkspaceInfo {
   attempt: number;              // Current attempt number (for retries)
   developmentPrompt?: string;   // Saved prompt for resuming
   lastError?: string;           // Last error message if failed
+  statusBeforeFailure?: WorkspaceStatus; // Status before transitioning to failed (for retry logic)
   mrUrl?: string;               // Merge request URL if created
   lastFeedbackAt?: number;      // Timestamp of last feedback received
   feedbackCount?: number;       // Number of feedback rounds processed
@@ -201,10 +202,14 @@ export class Storage {
   async updateWorkspaceStatus(
     messageId: string,
     status: WorkspaceStatus,
-    extra?: Partial<Pick<WorkspaceInfo, 'developmentPrompt' | 'lastError' | 'mrUrl' | 'attempt' | 'lastFeedbackAt' | 'feedbackCount' | 'threadId' | 'ideationConversation' | 'lastIdeationTimestamp' | 'workspacePath' | 'repoPath' | 'baseBranch'>>
+    extra?: Partial<Pick<WorkspaceInfo, 'developmentPrompt' | 'lastError' | 'mrUrl' | 'attempt' | 'lastFeedbackAt' | 'feedbackCount' | 'threadId' | 'ideationConversation' | 'lastIdeationTimestamp' | 'workspacePath' | 'repoPath' | 'baseBranch' | 'statusBeforeFailure'>>
   ): Promise<void> {
     const workspace = this.data.workspaces[messageId];
     if (workspace) {
+      // Automatically save the previous status when transitioning to failed
+      if (status === 'failed' && workspace.status !== 'failed') {
+        workspace.statusBeforeFailure = workspace.status;
+      }
       workspace.status = status;
       workspace.updatedAt = Date.now();
       if (extra) {
@@ -220,6 +225,7 @@ export class Storage {
         if (extra.workspacePath !== undefined) workspace.workspacePath = extra.workspacePath;
         if (extra.repoPath !== undefined) workspace.repoPath = extra.repoPath;
         if (extra.baseBranch !== undefined) workspace.baseBranch = extra.baseBranch;
+        if (extra.statusBeforeFailure !== undefined) workspace.statusBeforeFailure = extra.statusBeforeFailure;
       }
       await this.save();
       console.log(`[Storage] Updated workspace ${messageId} status: ${status}`);

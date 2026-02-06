@@ -25,6 +25,7 @@ interface WorkspaceRow {
   source_message_id: string | null;
   source_channel_id: string | null;
   base_branch: string | null;
+  status_before_failure: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -194,6 +195,7 @@ export class SupabaseStorage {
       sourceMessageId: row.source_message_id || undefined,
       sourceChannelId: row.source_channel_id || undefined,
       baseBranch: row.base_branch || undefined,
+      statusBeforeFailure: (row.status_before_failure as WorkspaceStatus) || undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -330,7 +332,7 @@ export class SupabaseStorage {
   async updateWorkspaceStatus(
     messageId: string,
     status: WorkspaceStatus,
-    extra?: Partial<Pick<WorkspaceInfo, 'developmentPrompt' | 'lastError' | 'mrUrl' | 'attempt' | 'lastFeedbackAt' | 'feedbackCount' | 'threadId' | 'ideationConversation' | 'lastIdeationTimestamp' | 'workspacePath' | 'repoPath' | 'baseBranch'>>
+    extra?: Partial<Pick<WorkspaceInfo, 'developmentPrompt' | 'lastError' | 'mrUrl' | 'attempt' | 'lastFeedbackAt' | 'feedbackCount' | 'threadId' | 'ideationConversation' | 'lastIdeationTimestamp' | 'workspacePath' | 'repoPath' | 'baseBranch' | 'statusBeforeFailure'>>
   ): Promise<void> {
     const workspace = this.cache.workspaces[messageId];
     if (!workspace) {
@@ -340,11 +342,21 @@ export class SupabaseStorage {
 
     const now = Date.now();
 
+    // Automatically save the previous status when transitioning to failed
+    if (status === 'failed' && workspace.status !== 'failed') {
+      workspace.statusBeforeFailure = workspace.status;
+    }
+
     // Build update object for workspaces table
     const workspaceUpdate: Record<string, any> = {
       status,
       updated_at: now,
     };
+
+    // Persist statusBeforeFailure to Supabase
+    if (status === 'failed' && workspace.statusBeforeFailure) {
+      workspaceUpdate.status_before_failure = workspace.statusBeforeFailure;
+    }
 
     if (extra) {
       if (extra.developmentPrompt !== undefined) workspaceUpdate.development_prompt = extra.developmentPrompt;
@@ -357,6 +369,7 @@ export class SupabaseStorage {
       if (extra.ideationConversation !== undefined) workspaceUpdate.ideation_conversation = extra.ideationConversation;
       if (extra.lastIdeationTimestamp !== undefined) workspaceUpdate.last_ideation_timestamp = extra.lastIdeationTimestamp;
       if (extra.baseBranch !== undefined) workspaceUpdate.base_branch = extra.baseBranch;
+      if (extra.statusBeforeFailure !== undefined) workspaceUpdate.status_before_failure = extra.statusBeforeFailure;
     }
 
     const { error: workspaceError } = await this.client
@@ -417,6 +430,7 @@ export class SupabaseStorage {
       if (extra.ideationConversation !== undefined) workspace.ideationConversation = extra.ideationConversation;
       if (extra.lastIdeationTimestamp !== undefined) workspace.lastIdeationTimestamp = extra.lastIdeationTimestamp;
       if (extra.baseBranch !== undefined) workspace.baseBranch = extra.baseBranch;
+      if (extra.statusBeforeFailure !== undefined) workspace.statusBeforeFailure = extra.statusBeforeFailure;
     }
 
     console.log(`[SupabaseStorage] Updated workspace ${messageId} status: ${status}`);

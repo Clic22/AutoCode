@@ -801,8 +801,25 @@ class AutoCode {
 
     // Determine the right status based on current workspace state
     if (workspace.status === 'failed') {
-      // Retry from failed: reset to mr_feedback_received if MR exists, otherwise created
-      const retryStatus = workspace.mrUrl ? 'mr_feedback_received' : 'created';
+      const previousStatus = workspace.statusBeforeFailure;
+      const ideationStatuses: WorkspaceStatus[] = ['ideation_pending', 'ideation_in_progress', 'ideation_complete'];
+      const wasInIdeation = previousStatus && ideationStatuses.includes(previousStatus);
+
+      // Determine the right retry status based on the status before failure
+      let retryStatus: WorkspaceStatus;
+      let retryMessage: string;
+
+      if (workspace.mrUrl) {
+        retryStatus = 'mr_feedback_received';
+        retryMessage = 'Je vais mettre à jour la MR existante.';
+      } else if (wasInIdeation) {
+        retryStatus = 'ideation_in_progress';
+        retryMessage = "Je reprends la phase d'idéation.";
+      } else {
+        retryStatus = 'created';
+        retryMessage = 'Je vais reprendre depuis le début.';
+      }
+
       await this.storage.updateWorkspaceStatus(messageId, retryStatus, {
         lastFeedbackAt: Date.now(),
         feedbackCount: (workspace.feedbackCount || 0) + 1,
@@ -812,8 +829,14 @@ class AutoCode {
       await this.notifyThread(messageId,
         `🔄 **Relance du traitement**\n\n` +
         `Je reprends le traitement suite à votre message.\n` +
-        `${workspace.mrUrl ? 'Je vais mettre à jour la MR existante.' : 'Je vais reprendre depuis le début.'}`
+        retryMessage
       );
+
+      // If resuming ideation, route directly to ideation handler instead of the queue
+      if (retryStatus === 'ideation_in_progress') {
+        await this.handleIdeationResponse(messageId, threadId, feedback);
+        return;
+      }
     } else {
       // Normal feedback flow (mr_created / awaiting_validation)
       await this.storage.updateWorkspaceStatus(messageId, 'mr_feedback_received', {

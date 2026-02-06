@@ -724,7 +724,10 @@ export class DiscordBot {
         throw new Error(`Thread ${threadId} not found`);
       }
 
-      await thread.send(content);
+      const chunks = this.splitMessage(content, 2000);
+      for (const chunk of chunks) {
+        await thread.send(chunk);
+      }
       console.log(`[Discord] Posted message to thread ${threadId}`);
     } catch (error) {
       console.error(`[Discord] Error posting to thread ${threadId}:`, error);
